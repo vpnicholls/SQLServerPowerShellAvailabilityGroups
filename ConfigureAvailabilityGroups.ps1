@@ -69,8 +69,7 @@ param (
     [Parameter(Mandatory=$true)][array]$TargetInstances,
     [Parameter(Mandatory=$true)][array]$AGConfigurations,
     [Parameter(Mandatory=$true)][string]$NetworkShare,
-    [Parameter(Mandatory=$false)][bool]$EnableAndRestart = $false,
-    [Parameter(Mandatory=$false)][bool]$UseAdvancedOnDeveloper = $false
+    [Parameter(Mandatory=$false)][bool]$EnableAndRestart = $false
 )
 
 # Generate log file name with datetime stamp
@@ -115,8 +114,7 @@ function Enable-AlwaysOn {
     }
 }
 
-# Function to check SQL Server edition for Basic AG support
-function Check-EditionForBasicAG {
+function Check-EditionForAGType {
     param (
         [string]$Instance,
         [PSCredential]$Credential
@@ -124,9 +122,23 @@ function Check-EditionForBasicAG {
 
     $editionQuery = "SELECT SERVERPROPERTY('Edition') AS Edition"
     $edition = Invoke-DbaQuery -SqlInstance $Instance -SqlCredential $Credential -Query $editionQuery | Select-Object -ExpandProperty Edition
-    $basicAGSupported = $edition -like "*Standard*"
-    Write-Log -Message "SQL Server Edition: $edition. Basic AG supported: $basicAGSupported" -Level "INFO"
-    return $basicAGSupported
+    Write-Log -Message "SQL Server Edition: $edition" -Level "INFO"
+
+    if ($edition -like "*Enterprise*" -or $edition -like "*Developer*") {
+        $agType = "Advanced"
+        if ($edition -like "*Developer*") {
+            Write-Log -Message "You are using Developer Edition. If you intend using Standard Edition in Production, be aware that Basic Availability Groups are not available in Developer Edition." -Level "WARNING"
+        }
+    } elseif ($edition -like "*Standard*") {
+        $agType = "Basic"
+    } else {
+        # Handle other editions like Express, Web, or any future editions
+        $agType = "Unsupported"
+        Write-Log -Message "This edition ($edition) does not support Availability Groups." -Level "WARNING"
+    }
+
+    Write-Log -Message "AG Type for this edition: $agType" -Level "INFO"
+    return $agType
 }
 
 # Function to create Availability Group
@@ -148,7 +160,8 @@ function Create-AvailabilityGroup {
         Primary = $PrimaryInstance
         Name = $AGName
         Secondary = $secondaryServers
-        SqlCredential = $Credential
+        PrimarySqlCredential = $Credential
+        SecondarySqlCredential = $Credential
         EnableException = $true
     }
 
