@@ -162,6 +162,7 @@ function Create-AvailabilityGroup {
         Secondary = $secondaryServers
         PrimarySqlCredential = $Credential
         SecondarySqlCredential = $Credential
+        Confirm = $false
         EnableException = $true
     }
 
@@ -210,10 +211,10 @@ function Configure-AvailabilityGroup {
 
         if ($IsMultiSubnet) {
             $listenerParams['IP'] = $ListenerIPAddresses
-            New-DbaAgListener @listenerParams -EnableMultiSubnetFailover
+            Add-DbaAgListener @listenerParams -EnableMultiSubnetFailover
         } else {
             $listenerParams['IP'] = $ListenerIPAddresses[0]  # Assuming single subnet for simplicity
-            New-DbaAgListener @listenerParams
+            Add-DbaAgListener @listenerParams
         }
         Write-Log -Message "Listener for AG $AGName configured." -Level "SUCCESS"
 
