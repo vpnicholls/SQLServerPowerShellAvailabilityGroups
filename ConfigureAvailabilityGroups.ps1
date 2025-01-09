@@ -15,9 +15,6 @@ This script:
 .PARAMETER myCredential
 Credentials used to connect to SQL Server instances.
 
-.PARAMETER WindowsCredential
-Windows credential used to connect to source and target host servers. Must have Local Admin rights.
-
 .PARAMETER ScriptEventLogPath
 Directory where script logs will be stored.
 
@@ -33,10 +30,13 @@ Array of hashtables where each hashtable specifies an AG name and its databases.
 .PARAMETER NetworkShare
 A network share for backup and restore operations.
 
+.PARAMETER EnableAndRestart
+A boolean, where $true instructs the script to attempt to enable the Always On feature and restart the service on all host servers. 
+Use $False if you've already had the the feature enabled and services restarted by other means.
+
 .EXAMPLE
 $params = @{
     myCredential = (Get-Credential -Message "Please enter your password for the SQL Server instances.")
-    WindowsCredential = (Get-Credential -Message "Please enter your password for the Windows Hosts.")
     ScriptEventLogPath = "$env:userprofile\Documents\Scripts\PowerShell\Migration\Logs"
     SourceInstance = "SQLPRIMARY"
     TargetInstances = @(
@@ -64,13 +64,13 @@ $params = @{
 
 param (
     [Parameter(Mandatory=$true)][PSCredential]$myCredential,
-    [Parameter(Mandatory=$true)][PSCredential]$WindowsCredential,
     [Parameter(Mandatory=$true)][string]$ScriptEventLogPath,
     [Parameter(Mandatory=$true)][string]$SourceInstance,
     [Parameter(Mandatory=$true)][array]$TargetInstances,
     [Parameter(Mandatory=$true)][array]$AGConfigurations,
     [Parameter(Mandatory=$true)][string]$NetworkShare,
-    [Parameter(Mandatory=$false)][bool]$EnableAndRestart = $false
+    [Parameter(Mandatory=$false)][bool]$EnableAndRestart = $false,
+    [Parameter(Mandatory=$false)][bool]$UseAdvancedOnDeveloper = $false
 )
 
 # Generate log file name with datetime stamp
@@ -90,10 +90,11 @@ function Write-Log {
     "$timestamp [$Level] $Message" | Out-File -FilePath $logFileName -Append
 }
 
-# Get Windows credential to handle host servers that are no on a domain
-$ServerCredentials = @{}
-foreach ($server in @($SourceInstance) + ($TargetInstances | ForEach-Object { $_.HostServer })) {
-    $ServerCredentials[$server] = Get-Credential -UserName "vaughan.nicholls" -Message "Enter password for $server"
+# Collect Windows Credential only if needed
+if ($EnableAndRestart) {
+    $WindowsCredential = Get-Credential -Message "Please enter your password for the Windows Hosts. Needed for service restart."
+} else {
+    Write-Log -Message "Windows credential not required as service restart is disabled." -Level "INFO"
 }
 
 # Function to check and enable Always On if not enabled
@@ -121,9 +122,9 @@ function Check-EditionForBasicAG {
         [PSCredential]$Credential
     )
 
-    $serverInfo = Get-DbaInstance -SqlInstance $Instance -SqlCredential $Credential
-    $edition = $serverInfo.Edition
-    $basicAGSupported = $edition -like "*Standard*" -or $edition -like "*Express*"
+    $editionQuery = "SELECT SERVERPROPERTY('Edition') AS Edition"
+    $edition = Invoke-DbaQuery -SqlInstance $Instance -SqlCredential $Credential -Query $editionQuery | Select-Object -ExpandProperty Edition
+    $basicAGSupported = $edition -like "*Standard*"
     Write-Log -Message "SQL Server Edition: $edition. Basic AG supported: $basicAGSupported" -Level "INFO"
     return $basicAGSupported
 }
@@ -153,7 +154,7 @@ function Create-AvailabilityGroup {
 
     if ($basicAG) {
         $agParams['Basic'] = $true
-        Write-Log -Message "Creating Basic Availability Group due to SQL Server Edition." -Level "INFO"
+        Write-Log -Message "Creating Basic Availability Group(s) due to SQL Server Edition." -Level "INFO"
     }
 
     try {
@@ -308,22 +309,13 @@ try {
     $instancesToCheck = @($SourceInstance) + ($TargetInstances | ForEach-Object { if ($_.Instance -eq "MSSQLSERVER") { $_.HostServer } else { "$($_.HostServer)\$($_.Instance)" } })
     foreach ($instance in $instancesToCheck) {
         if ($EnableAndRestart) {
-            # This block will only run if $EnableAndRestart is set to true
-            $serverName = $instance.Split('\')[0]
-            $windowsCred = if ($ServerCredentials.ContainsKey($serverName)) {
-                $ServerCredentials[$serverName]
-            } else {
-                Write-Log -Message "No credentials specified for server $serverName" -Level "ERROR"
-                throw "No matching Windows credentials for server $serverName"
-            }
-
             # Check and enable HADR if necessary
             $isHadrEnabled = Invoke-DbaQuery -SqlInstance $instance -SqlCredential $myCredential -Query "SELECT SERVERPROPERTY('IsHadrEnabled');" | Select-Object -ExpandProperty Column1
             if (-not $isHadrEnabled) {
                 Write-Log -Message "Enabling HADR on $instance." -Level "INFO"
                 Invoke-DbaQuery -SqlInstance $instance -SqlCredential $myCredential -Query "EXEC sp_configure 'show advanced options', 1; RECONFIGURE; EXEC sp_configure 'hadr enabled', 1; RECONFIGURE;"
                 Write-Log -Message "HADR configuration command executed. SQL Server service restart is required." -Level "INFO"
-                Restart-DbaService -SqlInstance $instance -Credential $windowsCred -Type Engine -EnableException | Out-Null
+                Restart-DbaService -SqlInstance $instance -Credential $WindowsCredential -Type Engine -EnableException | Out-Null
                 Write-Log -Message "SQL Server service on $instance has been restarted." -Level "INFO"
             } else {
                 Write-Log -Message "HADR is already enabled on $instance." -Level "INFO"
