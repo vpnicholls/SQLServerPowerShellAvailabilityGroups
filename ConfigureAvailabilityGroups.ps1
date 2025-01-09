@@ -254,7 +254,7 @@ function Add-DatabasesToAG {
     }
 }
 
-# Function to test failover and failback for an AG
+# Function to test failover and failback for an AG, recording time taken for each state change, to provide a benchmark for failovers
 function Test-Failover {
     param (
         [string]$AGName,
@@ -267,19 +267,30 @@ function Test-Failover {
         
         Write-Log -Message "Initiating failover to $instanceName for Availability Group $AGName." -Level "INFO"
         try {
-            Invoke-DbaAgFailover -SqlInstance $instanceName -AvailabilityGroup $AGName -SqlCredential $Credential -EnableException
-            Write-Log -Message "Failover to $instanceName completed." -Level "SUCCESS"
-            
-            # Wait for some time to ensure failover has been processed
-            Start-Sleep -Seconds 30
-            
+            $failoverStart = Get-Date
+
+            # Initiate failover
+            $failoverTime = Measure-Command {
+                Invoke-DbaAgFailover -SqlInstance $instanceName -AvailabilityGroup $AGName -SqlCredential $Credential -EnableException
+            }
+            Write-Log -Message "Failover to $instanceName completed in $($failoverTime.TotalSeconds) seconds." -Level "SUCCESS"
+
             # Initiate failback to the original primary
             Write-Log -Message "Initiating failback to $SourceInstance for Availability Group $AGName." -Level "INFO"
-            Invoke-DbaAgFailover -SqlInstance $SourceInstance -AvailabilityGroup $AGName -SqlCredential $Credential -EnableException
-            Write-Log -Message "Failback to $SourceInstance completed." -Level "SUCCESS"
+            $failbackTime = Measure-Command {
+                Invoke-DbaAgFailover -SqlInstance $SourceInstance -AvailabilityGroup $AGName -SqlCredential $Credential -EnableException
+            }
+            Write-Log -Message "Failback to $SourceInstance completed in $($failbackTime.TotalSeconds) seconds." -Level "SUCCESS"
+
+            # Total time for failover and failback
+            $totalTime = (Get-Date) - $failoverStart
+            Write-Log -Message "Total time for failover and failback cycle: $($totalTime.TotalSeconds) seconds." -Level "INFO"
 
             # Additional health check after failback
-            Test-DbaAvailabilityGroup -SqlInstance $SourceInstance -AvailabilityGroup $AGName -SqlCredential $Credential -EnableException
+            $healthCheckTime = Measure-Command {
+                Test-DbaAvailabilityGroup -SqlInstance $SourceInstance -AvailabilityGroup $AGName -SqlCredential $Credential -EnableException
+            }
+            Write-Log -Message "Health check after failback completed in $($healthCheckTime.TotalSeconds) seconds." -Level "INFO"
         }
         catch {
             Write-Log -Message "Failed to test failover/failback for AG $($AGName): $_" -Level "ERROR"
