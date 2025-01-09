@@ -1,15 +1,16 @@
 ﻿<#
 .SYNOPSIS
-Configures, validates, tests, and benchmarks SQL Server Always On Availability Groups.
+Configures multiple SQL Server Always On Availability Groups with database mapping.
 
 .DESCRIPTION
 This script:
 - Enables Always On on SQL Server instances.
-- Creates an Availability Group.
-- Adds databases to the Availability Group.
+- Creates one or more Availability Groups.
+- Creates the associated Availability Group Listeners.
+- Adds specified databases to their corresponding Availability Groups.
 - Configures replicas.
-- Performs failover and failback tests.
-- Validates and benchmarks the setup.
+- Performs failover and failback tests for each AG.
+- Validates database existence before adding them to AGs.
 
 .PARAMETER myCredential
 Credentials used to connect to SQL Server instances.
@@ -18,35 +19,36 @@ Credentials used to connect to SQL Server instances.
 Directory where script logs will be stored.
 
 .PARAMETER SourceInstance
-The primary SQL Server instance for the Availability Group.
+The primary SQL Server instance for the Availability Groups.
 
 .PARAMETER TargetInstances
 Array of hashtables specifying secondary SQL Server instances.
 
-.PARAMETER AGName
-Name of the Availability Group to be created.
-
-.PARAMETER Databases
-Databases to be added to the Availability Group.
+.PARAMETER AGConfigurations
+Array of hashtables where each hashtable specifies an AG name and its databases.
 
 .PARAMETER NetworkShare
 A network share for backup and restore operations.
 
 .EXAMPLE
 $params = @{
-    myCredential = (Get-Credential -UserName 'admin' -Message "Please enter your password")
-    ScriptEventLogPath = "$env:userprofile\Documents\Logs"
+    myCredential = (Get-Credential -Message "Please enter your password for the SQL Server instances.")
+    ScriptEventLogPath = "$env:userprofile\Documents\Scripts\PowerShell\Migration\Logs"
     SourceInstance = "SQLPRIMARY"
     TargetInstances = @(
         @{HostServer="SQLSECONDARY1"; Instance="MSSQLSERVER"},
         @{HostServer="SQLSECONDARY2"; Instance="MSSQLSERVER"}
     )
-    AGName = "MyAG"
-    Databases = @("DB1", "DB2")
     NetworkShare = "\\myserver\SQLBackups"
 }
 
-.\ConfigureAlwaysOn.ps1 @params
+$AGConfigurations = @(
+    @{Name="AG1"; Databases=@("DB1", "DB2"); ListenerName="AG1Listener"; ListenerIPAddresses=@("192.168.1.100"); IsMultiSubnet=$false; AvailabilityMode="SynchronousCommit"; FailoverMode="Automatic"; BackupPreference="Secondary"},
+    @{Name="AG2"; Databases=@("DB3"); ListenerName="AG2Listener"; ListenerIPAddresses=@("192.168.1.101", "192.168.2.101"); IsMultiSubnet=$true; AvailabilityMode="AsynchronousCommit"; FailoverMode="Manual"; BackupPreference="Primary"}
+)
+
+# Then call the script:
+.\ConfigureMultipleAGs.ps1 @params -AGConfigurations $AGConfigurations
 
 .NOTES
 - Ensure SQL Server instances are prepared for Always On (Windows Server Failover Clustering, matching SQL Server versions, etc.).
@@ -62,13 +64,12 @@ param (
     [Parameter(Mandatory=$true)][string]$ScriptEventLogPath,
     [Parameter(Mandatory=$true)][string]$SourceInstance,
     [Parameter(Mandatory=$true)][array]$TargetInstances,
-    [Parameter(Mandatory=$true)][string]$AGName,
-    [Parameter(Mandatory=$true)][string[]]$Databases,
+    [Parameter(Mandatory=$true)][array]$AGConfigurations,
     [Parameter(Mandatory=$true)][string]$NetworkShare
 )
 
 # Generate log file name with datetime stamp
-$logFileName = Join-Path -Path $ScriptEventLogPath -ChildPath "ConfigureAlwaysOnLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+$logFileName = Join-Path -Path $ScriptEventLogPath -ChildPath "ConfigureMultipleAGsLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
 function Write-Log {
     param (
@@ -95,10 +96,16 @@ function Enable-AlwaysOn {
     $currentConfig = Get-DbaSpConfigure -SqlInstance $Instance -SqlCredential $Credential -ConfigName 'hadr enabled'
     if ($currentConfig.ConfigValue -ne 1) {
         Write-Log -Message "Enabling Always On on $Instance." -Level "INFO"
-        Set-DbaSpConfigure -SqlInstance $Instance -SqlCredential $Credential -ConfigName 'hadr enabled' -Value 1 -EnableException | Out-Null
-        Write-Log -Message "Always On has been enabled on $Instance. A SQL Server restart is required." -Level "INFO"
-        Restart-DbaService -SqlInstance $Instance -SqlCredential $Credential -Type Engine -EnableException | Out-Null
-        Write-Log -Message "SQL Server service on $Instance has been restarted." -Level "INFO"
+        try {
+            Set-DbaSpConfigure -SqlInstance $Instance -SqlCredential $Credential -ConfigName 'hadr enabled' -Value 1 -EnableException | Out-Null
+            Write-Log -Message "Always On has been enabled on $Instance. A SQL Server restart is required." -Level "INFO"
+            Restart-DbaService -SqlInstance $Instance -SqlCredential $Credential -Type Engine -EnableException | Out-Null
+            Write-Log -Message "SQL Server service on $Instance has been restarted." -Level "INFO"
+        }
+        catch {
+            Write-Log -Message "Failed to enable Always On or restart SQL Server on $($Instance): $_" -Level "ERROR"
+            throw "Failed to enable Always On on $Instance. The script cannot proceed."
+        }
     } else {
         Write-Log -Message "Always On is already enabled on $Instance." -Level "INFO"
     }
@@ -151,12 +158,68 @@ function Create-AvailabilityGroup {
         Write-Log -Message "Availability Group $AGName created successfully." -Level "SUCCESS"
     }
     catch {
-        Write-Log -Message "Failed to create Availability Group: $_" -Level "ERROR"
+        Write-Log -Message "Failed to create Availability Group $($AGName): $_" -Level "ERROR"
         throw
     }
 }
 
-# Function to add databases to the Availability Group
+# Function to configure Availability Group properties
+function Configure-AvailabilityGroup {
+    param (
+        [string]$Instance,
+        [string]$AGName,
+        [PSCredential]$Credential,
+        [string]$ListenerName,
+        [string[]]$ListenerIPAddresses,
+        [int]$ListenerPort = 1433,
+        [bool]$IsMultiSubnet = $false,
+        [string]$AvailabilityMode = 'SynchronousCommit',  # SynchronousCommit or AsynchronousCommit
+        [string]$FailoverMode = 'Automatic',  # Automatic or Manual
+        [string]$BackupPreference = 'Secondary'  # Primary, Secondary, or None
+    )
+
+    Write-Log -Message "Configuring properties for Availability Group $AGName." -Level "INFO"
+
+    try {
+        # Configure Listener
+        $listenerParams = @{
+            SqlInstance = $Instance
+            AvailabilityGroup = $AGName
+            SqlCredential = $Credential
+            Name = $ListenerName
+            Port = $ListenerPort
+            EnableException = $true
+        }
+
+        if ($IsMultiSubnet) {
+            $listenerParams['IP'] = $ListenerIPAddresses
+            New-DbaAgListener @listenerParams -EnableMultiSubnetFailover
+        } else {
+            $listenerParams['IP'] = $ListenerIPAddresses[0]  # Assuming single subnet for simplicity
+            New-DbaAgListener @listenerParams
+        }
+        Write-Log -Message "Listener for AG $AGName configured." -Level "SUCCESS"
+
+        # Configure Availability Mode
+        Set-DbaAgReplica -SqlInstance $Instance -AvailabilityGroup $AGName -SqlCredential $Credential -AvailabilityMode $AvailabilityMode -EnableException
+        Write-Log -Message "Availability Mode set to $AvailabilityMode for AG $AGName." -Level "SUCCESS"
+
+        # Configure Failover Mode
+        Set-DbaAgReplica -SqlInstance $Instance -AvailabilityGroup $AGName -SqlCredential $Credential -FailoverMode $FailoverMode -EnableException
+        Write-Log -Message "Failover Mode set to $FailoverMode for AG $AGName." -Level "SUCCESS"
+
+        # Configure Backup Preference
+        Set-DbaAgReplica -SqlInstance $Instance -AvailabilityGroup $AGName -SqlCredential $Credential -BackupPriority 50 -ReadonlyRoutingUrl "TCP://$($Instance):$ListenerPort" -BackupPreference $BackupPreference -EnableException
+        Write-Log -Message "Backup Preference set to $BackupPreference for AG $AGName." -Level "SUCCESS"
+
+    }
+    catch {
+        Write-Log -Message "Failed to configure properties for AG $($AGName): $_" -Level "ERROR"
+        throw
+    }
+}
+
+# Function to validate and add databases to AG
 function Add-DatabasesToAG {
     param (
         [string]$Instance,
@@ -165,6 +228,15 @@ function Add-DatabasesToAG {
         [PSCredential]$Credential,
         [string]$NetworkShare
     )
+
+    # Check if databases exist
+    $existingDbs = Get-DbaDatabase -SqlInstance $Instance -SqlCredential $Credential -Database $Databases
+    $missingDbs = $Databases | Where-Object { $_ -notin $existingDbs.Name }
+
+    if ($missingDbs) {
+        Write-Log -Message "The following databases do not exist on $($Instance): ($($missingDbs -join ', '))." -Level "ERROR"
+        throw "Database validation failed for AG $AGName."
+    }
 
     foreach ($db in $Databases) {
         Write-Log -Message "Adding database $db to Availability Group $AGName." -Level "INFO"
@@ -176,13 +248,13 @@ function Add-DatabasesToAG {
             Write-Log -Message "Database $db added to Availability Group $AGName successfully." -Level "SUCCESS"
         }
         catch {
-            Write-Log -Message "Failed to add database $db to Availability Group: $_" -Level "ERROR"
+            Write-Log -Message "Failed to add database $db to Availability Group $($AGName): $_" -Level "ERROR"
             throw
         }
     }
 }
 
-# Function to test failover and failback
+# Function to test failover and failback for an AG
 function Test-Failover {
     param (
         [string]$AGName,
@@ -191,7 +263,7 @@ function Test-Failover {
     )
 
     foreach ($instance in $Instances) {
-        $instanceName = if ($instance.Instance -eq "MSSQLSERVER") { $instance.HostServer } else { "$($instance.HostServer)\$($_.Instance)" }
+        $instanceName = if ($instance.Instance -eq "MSSQLSERVER") { $instance.HostServer } else { "$($instance.HostServer)\$($instance.Instance)" }
         
         Write-Log -Message "Initiating failover to $instanceName for Availability Group $AGName." -Level "INFO"
         try {
@@ -210,64 +282,60 @@ function Test-Failover {
             Test-DbaAvailabilityGroup -SqlInstance $SourceInstance -AvailabilityGroup $AGName -SqlCredential $Credential -EnableException
         }
         catch {
-            Write-Log -Message "Failed to test failover/failback: $_" -Level "ERROR"
+            Write-Log -Message "Failed to test failover/failback for AG $($AGName): $_" -Level "ERROR"
             throw
         }
-    }
-}
-
-# Function to perform benchmarking
-function Benchmark-AG {
-    param (
-        [string]$AGName,
-        [string]$Instance,
-        [PSCredential]$Credential
-    )
-
-    Write-Log -Message "Benchmarking performance of Availability Group $AGName." -Level "INFO"
-    try {
-        # Example: Measure backup performance
-        $backupTime = Measure-Command { Backup-DbaDatabase -SqlInstance $Instance -Database $Databases[0] -SqlCredential $Credential -Path $NetworkShare -Type Full -EnableException }
-        Write-Log -Message "Backup time for $($Databases[0]): ($($backupTime.TotalSeconds) seconds)" -Level "INFO"
-
-        # Example: Check replication latency
-        $syncCheck = Get-DbaAgReplica -SqlInstance $Instance -AvailabilityGroup $AGName -SqlCredential $Credential
-        foreach ($replica in $syncCheck) {
-            Write-Log -Message "Replica $($replica.ReplicaServerName) synchronization health: $($replica.SynchronizationHealth)" -Level "INFO"
-        }
-
-        # Additional benchmarks can be added here, like read/write performance tests
-    }
-    catch {
-        Write-Log -Message "Benchmarking failed: $_" -Level "ERROR"
-        throw
     }
 }
 
 # Main execution
 try {
     # Ensure Always On is enabled on all instances
-    Enable-AlwaysOn -Instance $SourceInstance -Credential $myCredential
-    foreach ($instance in $TargetInstances) {
-        $instanceName = if ($instance.Instance -eq "MSSQLSERVER") { $instance.HostServer } else { "$($instance.HostServer)\$($instance.Instance)" }
-        Enable-AlwaysOn -Instance $instanceName -Credential $myCredential
+    $instancesToCheck = @($SourceInstance) + ($TargetInstances | ForEach-Object { if ($_.Instance -eq "MSSQLSERVER") { $_.HostServer } else { "$($_.HostServer)\$($_.Instance)" } })
+    foreach ($instance in $instancesToCheck) {
+        Enable-AlwaysOn -Instance $instance -Credential $myCredential
     }
 
-    # Create Availability Group
-    Create-AvailabilityGroup -PrimaryInstance $SourceInstance -AGName $AGName -SecondaryInstances $TargetInstances -Credential $myCredential
+    # Verify all instances have Always On enabled before proceeding
+    $allEnabled = $instancesToCheck | ForEach-Object {
+        $config = Get-DbaSpConfigure -SqlInstance $_ -SqlCredential $myCredential -ConfigName 'hadr enabled'
+        if ($config.ConfigValue -ne 1) {
+            throw "Always On not enabled on instance $_"
+        }
+        $true
+    }
 
-    # Add databases to AG
-    Add-DatabasesToAG -Instance $SourceInstance -AGName $AGName -Databases $Databases -Credential $myCredential -NetworkShare $NetworkShare
+    if ($allEnabled -contains $false) {
+        throw "Not all instances have Always On enabled. Script cannot proceed."
+    }
 
-    # Test failover and failback
-    $allInstances = @($TargetInstances) + @(@{HostServer=$SourceInstance; Instance="MSSQLSERVER"})
-    Test-Failover -AGName $AGName -Instances $allInstances -Credential $myCredential
+    # Process each AG configuration
+    foreach ($agConfig in $AGConfigurations) {
+        $agName = $agConfig.Name
+        $databases = $agConfig.Databases
+        $listenerName = $agConfig.ListenerName
+        $listenerIPAddresses = $agConfig.ListenerIPAddresses
+        $isMultiSubnet = $agConfig.IsMultiSubnet -as [bool]
+        $availabilityMode = if ($null -ne $agConfig.AvailabilityMode) { $agConfig.AvailabilityMode } else { 'SynchronousCommit' }
+        $failoverMode = if ($null -ne $agConfig.FailoverMode) { $agConfig.FailoverMode } else { 'Automatic' }
+        $backupPreference = if ($null -ne $agConfig.BackupPreference) { $agConfig.BackupPreference } else { 'Primary' }
 
-    # Benchmarking
-    Benchmark-AG -AGName $AGName -Instance $SourceInstance -Credential $myCredential
+        # Create Availability Group
+        Create-AvailabilityGroup -PrimaryInstance $SourceInstance -AGName $agName -SecondaryInstances $TargetInstances -Credential $myCredential
 
-    Write-Log -Message "Always On configuration, testing, and benchmarking completed." -Level "SUCCESS"
+        # Configure AG properties including listener, availability mode, etc.
+        Configure-AvailabilityGroup -Instance $SourceInstance -AGName $agName -Credential $myCredential -ListenerName $listenerName -ListenerIPAddresses $listenerIPAddresses -IsMultiSubnet $isMultiSubnet -AvailabilityMode $availabilityMode -FailoverMode $failoverMode -BackupPreference $backupPreference
+
+        # Add databases to AG after validation
+        Add-DatabasesToAG -Instance $SourceInstance -AGName $agName -Databases $databases -Credential $myCredential -NetworkShare $NetworkShare
+
+        # Test failover and failback for each AG
+        $allInstances = @($TargetInstances) + @(@{HostServer=$SourceInstance; Instance="MSSQLSERVER"})
+        Test-Failover -AGName $agName -Instances $allInstances -Credential $myCredential
+    }
+
+    Write-Log -Message "All Availability Groups configuration, testing completed." -Level "SUCCESS"
 }
 catch {
-    Write-Log -Message "An error occurred during Always On configuration, testing, or benchmarking: $_" -Level "ERROR"
+    Write-Log -Message "An error occurred during multiple AG configuration: $_" -Level "ERROR"
 }
