@@ -15,6 +15,9 @@ This script:
 .PARAMETER myCredential
 Credentials used to connect to SQL Server instances.
 
+.PARAMETER WindowsCredential
+Windows credential used to connect to source and target host servers. Must have Local Admin rights.
+
 .PARAMETER ScriptEventLogPath
 Directory where script logs will be stored.
 
@@ -33,6 +36,7 @@ A network share for backup and restore operations.
 .EXAMPLE
 $params = @{
     myCredential = (Get-Credential -Message "Please enter your password for the SQL Server instances.")
+    WindowsCredential = (Get-Credential -Message "Please enter your password for the Windows Hosts.")
     ScriptEventLogPath = "$env:userprofile\Documents\Scripts\PowerShell\Migration\Logs"
     SourceInstance = "SQLPRIMARY"
     TargetInstances = @(
@@ -40,15 +44,14 @@ $params = @{
         @{HostServer="SQLSECONDARY2"; Instance="MSSQLSERVER"}
     )
     NetworkShare = "\\myserver\SQLBackups"
+    AGConfigurations = @(
+        @{Name="AG1"; Databases=@("DB1", "DB2"); ListenerName="AG1Listener"; ListenerIPAddresses=@("192.168.1.100"); IsMultiSubnet=$false; AvailabilityMode="SynchronousCommit"; FailoverMode="Automatic"; BackupPreference="Secondary"},
+        @{Name="AG2"; Databases=@("DB3"); ListenerName="AG2Listener"; ListenerIPAddresses=@("192.168.1.101", "192.168.2.101"); IsMultiSubnet=$true; AvailabilityMode="AsynchronousCommit"; FailoverMode="Manual"; BackupPreference="Primary"}
+    )
 }
 
-$AGConfigurations = @(
-    @{Name="AG1"; Databases=@("DB1", "DB2"); ListenerName="AG1Listener"; ListenerIPAddresses=@("192.168.1.100"); IsMultiSubnet=$false; AvailabilityMode="SynchronousCommit"; FailoverMode="Automatic"; BackupPreference="Secondary"},
-    @{Name="AG2"; Databases=@("DB3"); ListenerName="AG2Listener"; ListenerIPAddresses=@("192.168.1.101", "192.168.2.101"); IsMultiSubnet=$true; AvailabilityMode="AsynchronousCommit"; FailoverMode="Manual"; BackupPreference="Primary"}
-)
-
 # Then call the script:
-.\ConfigureMultipleAGs.ps1 @params -AGConfigurations $AGConfigurations
+.\ConfigureAvailabilityGroups.ps1 @params
 
 .NOTES
 - Ensure SQL Server instances are prepared for Always On (Windows Server Failover Clustering, matching SQL Server versions, etc.).
@@ -61,15 +64,17 @@ $AGConfigurations = @(
 
 param (
     [Parameter(Mandatory=$true)][PSCredential]$myCredential,
+    [Parameter(Mandatory=$true)][PSCredential]$WindowsCredential,
     [Parameter(Mandatory=$true)][string]$ScriptEventLogPath,
     [Parameter(Mandatory=$true)][string]$SourceInstance,
     [Parameter(Mandatory=$true)][array]$TargetInstances,
     [Parameter(Mandatory=$true)][array]$AGConfigurations,
-    [Parameter(Mandatory=$true)][string]$NetworkShare
+    [Parameter(Mandatory=$true)][string]$NetworkShare,
+    [Parameter(Mandatory=$false)][bool]$EnableAndRestart = $false
 )
 
 # Generate log file name with datetime stamp
-$logFileName = Join-Path -Path $ScriptEventLogPath -ChildPath "ConfigureMultipleAGsLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+$logFileName = Join-Path -Path $ScriptEventLogPath -ChildPath "ConfigureAlwaysOnAGsLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
 function Write-Log {
     param (
@@ -85,27 +90,25 @@ function Write-Log {
     "$timestamp [$Level] $Message" | Out-File -FilePath $logFileName -Append
 }
 
+# Get Windows credential to handle host servers that are no on a domain
+$ServerCredentials = @{}
+foreach ($server in @($SourceInstance) + ($TargetInstances | ForEach-Object { $_.HostServer })) {
+    $ServerCredentials[$server] = Get-Credential -UserName "vaughan.nicholls" -Message "Enter password for $server"
+}
+
 # Function to check and enable Always On if not enabled
 function Enable-AlwaysOn {
     param (
         [string]$Instance,
-        [PSCredential]$Credential
+        [PSCredential]$SqlCredential
     )
 
     Write-Log -Message "Checking if Always On is enabled on $Instance." -Level "INFO"
-    $currentConfig = Get-DbaSpConfigure -SqlInstance $Instance -SqlCredential $Credential -ConfigName 'hadr enabled'
-    if ($currentConfig.ConfigValue -ne 1) {
-        Write-Log -Message "Enabling Always On on $Instance." -Level "INFO"
-        try {
-            Set-DbaSpConfigure -SqlInstance $Instance -SqlCredential $Credential -ConfigName 'hadr enabled' -Value 1 -EnableException | Out-Null
-            Write-Log -Message "Always On has been enabled on $Instance. A SQL Server restart is required." -Level "INFO"
-            Restart-DbaService -SqlInstance $Instance -SqlCredential $Credential -Type Engine -EnableException | Out-Null
-            Write-Log -Message "SQL Server service on $Instance has been restarted." -Level "INFO"
-        }
-        catch {
-            Write-Log -Message "Failed to enable Always On or restart SQL Server on $($Instance): $_" -Level "ERROR"
-            throw "Failed to enable Always On on $Instance. The script cannot proceed."
-        }
+    $isHadrEnabled = Invoke-DbaQuery -SqlInstance $Instance -SqlCredential $SqlCredential -Query "SELECT SERVERPROPERTY('IsHadrEnabled');" | Select-Object -ExpandProperty Column1
+
+    if (-not $isHadrEnabled) {
+        Write-Log -Message "Always On is not enabled on $Instance. Manual configuration required." -Level "WARNING"
+        throw "HADR is not enabled on $Instance. Please enable it manually and restart the service."
     } else {
         Write-Log -Message "Always On is already enabled on $Instance." -Level "INFO"
     }
@@ -301,23 +304,34 @@ function Test-Failover {
 
 # Main execution
 try {
-    # Ensure Always On is enabled on all instances
+    # Ensure Always On is enabled on all instances, but don't enable if not set in the script parameter
     $instancesToCheck = @($SourceInstance) + ($TargetInstances | ForEach-Object { if ($_.Instance -eq "MSSQLSERVER") { $_.HostServer } else { "$($_.HostServer)\$($_.Instance)" } })
     foreach ($instance in $instancesToCheck) {
-        Enable-AlwaysOn -Instance $instance -Credential $myCredential
-    }
+        if ($EnableAndRestart) {
+            # This block will only run if $EnableAndRestart is set to true
+            $serverName = $instance.Split('\')[0]
+            $windowsCred = if ($ServerCredentials.ContainsKey($serverName)) {
+                $ServerCredentials[$serverName]
+            } else {
+                Write-Log -Message "No credentials specified for server $serverName" -Level "ERROR"
+                throw "No matching Windows credentials for server $serverName"
+            }
 
-    # Verify all instances have Always On enabled before proceeding
-    $allEnabled = $instancesToCheck | ForEach-Object {
-        $config = Get-DbaSpConfigure -SqlInstance $_ -SqlCredential $myCredential -ConfigName 'hadr enabled'
-        if ($config.ConfigValue -ne 1) {
-            throw "Always On not enabled on instance $_"
+            # Check and enable HADR if necessary
+            $isHadrEnabled = Invoke-DbaQuery -SqlInstance $instance -SqlCredential $myCredential -Query "SELECT SERVERPROPERTY('IsHadrEnabled');" | Select-Object -ExpandProperty Column1
+            if (-not $isHadrEnabled) {
+                Write-Log -Message "Enabling HADR on $instance." -Level "INFO"
+                Invoke-DbaQuery -SqlInstance $instance -SqlCredential $myCredential -Query "EXEC sp_configure 'show advanced options', 1; RECONFIGURE; EXEC sp_configure 'hadr enabled', 1; RECONFIGURE;"
+                Write-Log -Message "HADR configuration command executed. SQL Server service restart is required." -Level "INFO"
+                Restart-DbaService -SqlInstance $instance -Credential $windowsCred -Type Engine -EnableException | Out-Null
+                Write-Log -Message "SQL Server service on $instance has been restarted." -Level "INFO"
+            } else {
+                Write-Log -Message "HADR is already enabled on $instance." -Level "INFO"
+            }
+        } else {
+            # Only check if HADR is enabled, throw an error if not
+            Enable-AlwaysOn -Instance $instance -SqlCredential $myCredential
         }
-        $true
-    }
-
-    if ($allEnabled -contains $false) {
-        throw "Not all instances have Always On enabled. Script cannot proceed."
     }
 
     # Process each AG configuration
