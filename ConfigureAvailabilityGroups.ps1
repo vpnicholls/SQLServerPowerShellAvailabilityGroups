@@ -155,7 +155,7 @@ function Create-AvailabilityGroup {
         if ($_.Instance -eq "MSSQLSERVER") { $_.HostServer } else { "$($_.HostServer)\$($_.Instance)" }
     }
 
-    $basicAG = Check-EditionForBasicAG -Instance $PrimaryInstance -Credential $Credential
+    $agType = Check-EditionForAGType -Instance $PrimaryInstance -Credential $Credential
     $agParams = @{
         Primary = $PrimaryInstance
         Name = $AGName
@@ -165,7 +165,7 @@ function Create-AvailabilityGroup {
         EnableException = $true
     }
 
-    if ($basicAG) {
+    if ($agType) {
         $agParams['Basic'] = $true
         Write-Log -Message "Creating Basic Availability Group(s) due to SQL Server Edition." -Level "INFO"
     }
@@ -349,6 +349,9 @@ try {
         $availabilityMode = if ($null -ne $agConfig.AvailabilityMode) { $agConfig.AvailabilityMode } else { 'SynchronousCommit' }
         $failoverMode = if ($null -ne $agConfig.FailoverMode) { $agConfig.FailoverMode } else { 'Automatic' }
         $backupPreference = if ($null -ne $agConfig.BackupPreference) { $agConfig.BackupPreference } else { 'Primary' }
+
+        # Check the edition to determine AG type
+        $agType = Check-EditionForAGType -Instance $SourceInstance -Credential $myCredential
 
         # Create Availability Group
         Create-AvailabilityGroup -PrimaryInstance $SourceInstance -AGName $agName -SecondaryInstances $TargetInstances -Credential $myCredential
