@@ -507,7 +507,13 @@ try {
 
         # Test failover and failback for each AG
         try {
+            if ($null -eq $TargetInstances -or $TargetInstances.Count -eq 0) {
+                Write-Log -Message "TargetInstances is null or empty when trying to test failover for AG $agName." -Level "ERROR"
+                throw "No target instances provided for failover testing."
+            }
             $allInstances = @($TargetInstances) + @(@{HostServer=$SourceInstance; Instance="MSSQLSERVER"})
+            Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): After creating `$allInstances, its value is: $($allInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
+    
             if ($allInstances -and $allInstances.Count -gt 0) {  # Check if $allInstances is not null and has elements
                 Test-Failover -AGName $agName -Instances $allInstances -Credential $myCredential
             } else {
