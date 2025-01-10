@@ -37,6 +37,7 @@ A boolean, where $true instructs the script to attempt to enable the Always On f
 Use $False if you've already had the the feature enabled and services restarted by other means.
 
 .EXAMPLE
+# First, set $params
 $params = @{
     myCredential = (Get-Credential -Message "Please enter your password for the SQL Server instances.")
     ScriptEventLogPath = "$env:userprofile\Documents\Scripts\PowerShell\Migration\Logs"
@@ -90,13 +91,6 @@ function Write-Log {
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     "$timestamp [$Level] $Message" | Out-File -FilePath $logFileName -Append
 }
-
-# Collect Windows Credential only if needed
-#if ($EnableAndRestart) {
-#    $WindowsCredential = Get-Credential -Message "Please enter your password for the Windows Hosts. Needed for service restart."
-#} else {
-#    Write-Log -Message "Windows credential not required as service restart is disabled." -Level "INFO"
-#}
 
 # Collect Windows Credential for each host server
 $ServerCredentials = @{}
