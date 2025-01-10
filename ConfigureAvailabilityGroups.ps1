@@ -269,7 +269,7 @@ function CreateAvailabilityGroup {
     $agParams['BackupPriority'] = 50  # Example, adjust as needed
     $agParams['ConnectionModeInPrimaryRole'] = 'AllowAllConnections'  # Adjust if needed
     $agParams['ConnectionModeInSecondaryRole'] = 'AllowNoConnections' # Adjust if needed
-    $agParams['SeedingMode'] = 'Automatic'  # Automatic seeding, adjust if manual is preferred
+    $agParams['SeedingMode'] = 'Manual'
 
     # Listener configuration
     $agParams['IPAddress'] = $agConfig.ListenerIPAddresses
@@ -280,7 +280,7 @@ function CreateAvailabilityGroup {
         Write-Log -Message "Availability Group $AGName created and configured successfully." -Level "SUCCESS"
     }
     catch {
-        Write-Log -Message "Failed to create and configure Availability Group $($AGName): $_" -Level "ERROR"
+        Write-Log -Message "Failed to create and configure Availability Group ${AGName}: ${_}" -Level "ERROR"
         throw
     }
 }
@@ -292,7 +292,8 @@ function Add-DatabasesToAG {
         [string]$AGName,
         [string[]]$Databases,
         [PSCredential]$Credential,
-        [string]$NetworkShare
+        [string]$NetworkShare,
+        [ValidateSet('Manual', 'Automatic')][string]$SeedingMode
     )
 
     # Check if databases exist
@@ -300,21 +301,45 @@ function Add-DatabasesToAG {
     $missingDbs = $Databases | Where-Object { $_ -notin $existingDbs.Name }
 
     if ($missingDbs) {
-        Write-Log -Message "The following databases do not exist on $($Instance): ($($missingDbs -join ', '))." -Level "ERROR"
+        Write-Log -Message "The following databases do not exist on ${Instance}: ($($missingDbs -join ', '))." -Level "ERROR"
         throw "Database validation failed for AG $AGName."
     }
 
     foreach ($db in $Databases) {
-        Write-Log -Message "Adding database $db to Availability Group $AGName." -Level "INFO"
+        Write-Log -Message "Adding database $db to Availability Group $AGName with ${SeedingMode} seeding." -Level "INFO"
         try {
-            $backupResult = Backup-DbaDatabase -SqlInstance $Instance -Database $db -SqlCredential $Credential -Path $NetworkShare -Type Full -EnableException
-            Write-Log -Message "Database $db backed up successfully." -Level "INFO"
+            if ($SeedingMode -eq 'Automatic') {
+                # Automatic seeding - SQL Server handles synchronization
+                $joinResult = Add-DbaAgDatabase -SqlInstance $Instance -Database $db -AvailabilityGroup $AGName -SqlCredential $Credential -EnableException
+                Write-Log -Message "Database $db automatically seeded and joined to Availability Group $AGName successfully." -Level "SUCCESS"
+            }
+            else {  # Manual seeding
+                # Backup on primary
+                $backupResult = Backup-DbaDatabase -SqlInstance $Instance -Database $db -SqlCredential $Credential -Path $NetworkShare -Type Full -EnableException
+                Write-Log -Message "Database $db backed up successfully." -Level "INFO"
 
-            $joinResult = Add-DbaAgDatabase -SqlInstance $Instance -Database $db -AvailabilityGroup $AGName -SqlCredential $Credential -SharedPath $NetworkShare -EnableException
-            Write-Log -Message "Database $db added to Availability Group $AGName successfully." -Level "SUCCESS"
+                # Restore on secondaries with NORECOVERY
+                $secondaryInstances = $TargetInstances | ForEach-Object { if ($_.Instance -eq "MSSQLSERVER") { $_.HostServer } else { "$($_.HostServer)\$($_.Instance)" } }
+                foreach ($secondary in $secondaryInstances) {
+                    $restoreParams = @{
+                        SqlInstance = $secondary
+                        SqlCredential = $Credential
+                        Database = $db
+                        Path = $NetworkShare
+                        NoRecovery = $true
+                        EnableException = $true
+                    }
+                    Restore-DbaDatabase @restoreParams
+                    Write-Log -Message "Database $db restored on secondary ${secondary} with NORECOVERY." -Level "INFO"
+                }
+
+                # Join the database to AG
+                $joinResult = Add-DbaAgDatabase -SqlInstance $Instance -Database $db -AvailabilityGroup $AGName -SqlCredential $Credential -EnableException
+                Write-Log -Message "Database $db manually seeded and joined to Availability Group $AGName successfully." -Level "SUCCESS"
+            }
         }
         catch {
-            Write-Log -Message "Failed to add database $db to Availability Group $($AGName): $_" -Level "ERROR"
+            Write-Log -Message "Failed to add database $db to Availability Group ${AGName} with ${SeedingMode} seeding: ${_}" -Level "ERROR"
             throw
         }
     }
@@ -420,6 +445,7 @@ try {
     foreach ($agConfig in $AGConfigurations) {
         $agName = $agConfig.Name
         $databases = $agConfig.Databases
+        $seedingMode = $agParams['SeedingMode']  # Assuming $agParams is still in scope
 
         # Check the edition to determine AG type
         $agType = Check-EditionForAGType -Instance $SourceInstance -Credential $myCredential
