@@ -4,6 +4,8 @@ Configures multiple SQL Server Always On Availability Groups with database mappi
 
 .DESCRIPTION
 This script:
+- Checks whether the host servers are part of a domain
+- If not part of a domain, checks to see whether certificate-based authentication is configured
 - Enables Always On on SQL Server instances.
 - Creates one or more Availability Groups.
 - Creates the associated Availability Group Listeners.
@@ -94,6 +96,44 @@ if ($EnableAndRestart) {
     $WindowsCredential = Get-Credential -Message "Please enter your password for the Windows Hosts. Needed for service restart."
 } else {
     Write-Log -Message "Windows credential not required as service restart is disabled." -Level "INFO"
+}
+
+# Function to check if server is part of a domain
+function IsServerOnDomain {
+    param (
+        [string]$ServerName
+    )
+
+    try {
+        $computerInfo = Get-WmiObject -Class Win32_ComputerSystem -ComputerName $ServerName -ErrorAction Stop
+        return $computerInfo.PartOfDomain
+    }
+    catch {
+        Write-Log -Message "Failed to check domain status for server $($ServerName): $_" -Level "ERROR"
+        throw "Failed to check domain status."
+    }
+}
+
+# Function to check if certificate-based authentication is configured for HADR
+function CheckCertificateAuthForHADR {
+    param (
+        [string]$Instance,
+        [PSCredential]$Credential
+    )
+
+    $query = @"
+    SELECT COUNT(*) AS CertAuthCount 
+    FROM sys.database_mirroring_endpoints 
+    WHERE name = 'hadr_endpoint' AND authentication_type_desc = 'CERTIFICATE'
+"@
+    try {
+        $result = Invoke-DbaQuery -SqlInstance $Instance -SqlCredential $Credential -Query $query | Select-Object -ExpandProperty CertAuthCount
+        return $result -gt 0
+    }
+    catch {
+        Write-Log -Message "Failed to check HADR endpoint authentication for server $($Instance): $_" -Level "ERROR"
+        throw "Failed to check HADR endpoint authentication."
+    }
 }
 
 # Function to check and enable Always On if not enabled
@@ -282,22 +322,32 @@ function Test-Failover {
 try {
     # Ensure Always On is enabled on all instances, but don't enable if not set in the script parameter
     $instancesToCheck = @($SourceInstance) + ($TargetInstances | ForEach-Object { if ($_.Instance -eq "MSSQLSERVER") { $_.HostServer } else { "$($_.HostServer)\$($_.Instance)" } })
+    $isDomainEnvironment = $true
     foreach ($instance in $instancesToCheck) {
         if ($EnableAndRestart) {
-            # Check and enable HADR if necessary
-            $isHadrEnabled = Invoke-DbaQuery -SqlInstance $instance -SqlCredential $myCredential -Query "SELECT SERVERPROPERTY('IsHadrEnabled');" | Select-Object -ExpandProperty Column1
-            if (-not $isHadrEnabled) {
-                Write-Log -Message "Enabling HADR on $instance." -Level "INFO"
-                Invoke-DbaQuery -SqlInstance $instance -SqlCredential $myCredential -Query "EXEC sp_configure 'show advanced options', 1; RECONFIGURE; EXEC sp_configure 'hadr enabled', 1; RECONFIGURE;"
-                Write-Log -Message "HADR configuration command executed. SQL Server service restart is required." -Level "INFO"
-                Restart-DbaService -SqlInstance $instance -Credential $WindowsCredential -Type Engine -EnableException | Out-Null
-                Write-Log -Message "SQL Server service on $instance has been restarted." -Level "INFO"
-            } else {
-                Write-Log -Message "HADR is already enabled on $instance." -Level "INFO"
-            }
-        } else {
-            # Only check if HADR is enabled, throw an error if not
             Enable-AlwaysOn -Instance $instance -SqlCredential $myCredential
+        } else {
+            Enable-AlwaysOn -Instance $instance -SqlCredential $myCredential
+        }
+
+        # Check if server is part of domain
+        $serverName = $instance.Split('\')[0]
+        if (-not (IsServerOnDomain -ServerName $serverName)) {
+            $isDomainEnvironment = $false
+        }
+    }
+
+    # If not in a domain environment, check for certificate-based authentication
+    if (-not $isDomainEnvironment) {
+        foreach ($instance in $instancesToCheck) {
+            $serverName = $instance.Split('\')[0]
+            $serviceAccount = (Get-DbaSqlService -ComputerName $serverName -SqlCredential $myCredential | Where-Object {$_.ServiceType -eq 'Engine'}).ServiceAccount
+            if ($serviceAccount -like "NT*") {
+                if (-not (CheckCertificateAuthForHADR -Instance $instance -Credential $myCredential)) {
+                    Write-Log -Message "Certificate-based authentication is not configured for HADR on $instance. This is required when using built-in accounts in a workgroup environment." -Level "FATAL"
+                    throw "Certificate-based authentication for HADR is not configured. Cannot proceed."
+                }
+            }
         }
     }
 
