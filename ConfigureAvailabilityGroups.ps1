@@ -447,6 +447,13 @@ try {
         $databases = $agConfig.Databases
         $seedingMode = $agParams['SeedingMode']  # Assuming $agParams is still in scope
 
+        # Check if AG already exists
+        $existingAGs = Get-DbaAvailabilityGroup -SqlInstance $SourceInstance -SqlCredential $myCredential | Select-Object -ExpandProperty Name
+        if ($agName -in $existingAGs) {
+            Write-Log -Message "Availability Group $agName already exists. Skipping creation." -Level "INFO"
+            # You might want to check the configuration state here in the future
+            continue
+        }
 
         # Check the edition to determine AG type
         $agType = Check-EditionForAGType -Instance $SourceInstance -Credential $myCredential
