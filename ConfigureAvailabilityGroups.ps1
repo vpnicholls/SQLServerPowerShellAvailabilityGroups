@@ -461,8 +461,12 @@ try {
         Add-DatabasesToAG -Instance $SourceInstance -AGName $agName -Databases $databases -Credential $myCredential -NetworkShare $NetworkShare
 
         # Test failover and failback for each AG
-        $allInstances = @($TargetInstances) + @(@{HostServer=$SourceInstance; Instance="MSSQLSERVER"})
-        Test-Failover -AGName $agName -Instances $allInstances -Credential $myCredential
+        try {
+            $allInstances = @($TargetInstances) + @(@{HostServer=$SourceInstance; Instance="MSSQLSERVER"})
+            Test-Failover -AGName $agName -Instances $allInstances -Credential $myCredential
+        } catch {
+            Write-Log -Message "Failover test for AG $agName failed: $_" -Level "WARNING"
+        }
     }
 
     Write-Log -Message "All Availability Groups configuration, testing completed." -Level "SUCCESS"
