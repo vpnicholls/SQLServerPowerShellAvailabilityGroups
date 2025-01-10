@@ -362,14 +362,14 @@ function Test-Failover {
 
             # Initiate failover
             $failoverTime = Measure-Command {
-                Invoke-DbaAgFailover -SqlInstance $instanceName -AvailabilityGroup $AGName -SqlCredential $Credential -EnableException
+                Invoke-DbaAgFailover -SqlInstance $instanceName -AvailabilityGroup $AGName -SqlCredential $Credential -Confirm False -EnableException
             }
             Write-Log -Message "Failover to $instanceName completed in $($failoverTime.TotalSeconds) seconds." -Level "SUCCESS"
 
             # Initiate failback to the original primary
             Write-Log -Message "Initiating failback to $SourceInstance for Availability Group $AGName." -Level "INFO"
             $failbackTime = Measure-Command {
-                Invoke-DbaAgFailover -SqlInstance $SourceInstance -AvailabilityGroup $AGName -SqlCredential $Credential -EnableException
+                Invoke-DbaAgFailover -SqlInstance $SourceInstance -AvailabilityGroup $AGName -SqlCredential $Credential -Confirm False -EnableException
             }
             Write-Log -Message "Failback to $SourceInstance completed in $($failbackTime.TotalSeconds) seconds." -Level "SUCCESS"
 
@@ -379,7 +379,7 @@ function Test-Failover {
 
             # Additional health check after failback
             $healthCheckTime = Measure-Command {
-                Test-DbaAvailabilityGroup -SqlInstance $SourceInstance -AvailabilityGroup $AGName -SqlCredential $Credential -EnableException
+                Test-DbaAvailabilityGroup -SqlInstance $SourceInstance -AvailabilityGroup $AGName -SqlCredential $Credential -Confirm False -EnableException
             }
             Write-Log -Message "Health check after failback completed in $($healthCheckTime.TotalSeconds) seconds." -Level "INFO"
         }
@@ -446,6 +446,7 @@ try {
         $agName = $agConfig.Name
         $databases = $agConfig.Databases
         $seedingMode = $agParams['SeedingMode']  # Assuming $agParams is still in scope
+
 
         # Check the edition to determine AG type
         $agType = Check-EditionForAGType -Instance $SourceInstance -Credential $myCredential
