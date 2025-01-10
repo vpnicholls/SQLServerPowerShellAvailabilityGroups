@@ -144,6 +144,45 @@ function CheckCertificateAuthForHADR {
     }
 }
 
+function EnsureDatabasesInFullRecoveryMode {
+    param (
+        [string]$Instance,
+        [PSCredential]$Credential,
+        [string[]]$Databases
+    )
+
+    Write-Log -Message "Ensuring databases are in FULL recovery mode on $Instance." -Level "INFO"
+
+    foreach ($db in $Databases) {
+        try {
+            # Check the database recovery model
+            $dbInfo = Get-DbaDatabase -SqlInstance $Instance -SqlCredential $Credential -Database $db | Select-Object Name, RecoveryModel
+
+            if ($null -eq $dbInfo) {
+                Write-Log -Message "Database $db does not exist on $Instance." -Level "ERROR"
+                throw "Database $db not found on $Instance."
+            }
+
+            if ($dbInfo.RecoveryModel -ne "Full") {
+                Write-Log -Message "Changing recovery model for database $db from $($dbInfo.RecoveryModel) to Full." -Level "INFO"
+                
+                # Change the database to FULL recovery model
+                $alterQuery = "ALTER DATABASE [$db] SET RECOVERY FULL;"
+                $result = Invoke-DbaQuery -SqlInstance $Instance -SqlCredential $Credential -Query $alterQuery -EnableException
+                Write-Log -Message "Database $db recovery model set to FULL." -Level "SUCCESS"
+            } else {
+                Write-Log -Message "Database $db is already in FULL recovery mode." -Level "INFO"
+            }
+        }
+        catch {
+            Write-Log -Message "Failed to ensure FULL recovery mode for database $db on $($Instance): $_" -Level "ERROR"
+            throw
+        }
+    }
+
+    Write-Log -Message "All databases checked and set to FULL recovery mode on $Instance." -Level "SUCCESS"
+}
+
 # Function to check and enable Always On if not enabled
 function Enable-AlwaysOn {
     param (
@@ -387,6 +426,9 @@ try {
 
         # Create and Configure Availability Group
         CreateAvailabilityGroup -PrimaryInstance $SourceInstance -AGName $agName -SecondaryInstances $TargetInstances -Credential $myCredential -agConfig $agConfig
+
+        # Before adding databases to AG
+        EnsureDatabasesInFullRecoveryMode -Instance $SourceInstance -Credential $myCredential -Databases $databases
 
         # Add databases to AG after validation
         Add-DatabasesToAG -Instance $SourceInstance -AGName $agName -Databases $databases -Credential $myCredential -NetworkShare $NetworkShare
