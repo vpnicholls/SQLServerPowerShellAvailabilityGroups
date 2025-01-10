@@ -45,8 +45,8 @@ $params = @{
     )
     NetworkShare = "\\myserver\SQLBackups"
     AGConfigurations = @(
-        @{Name="AG1"; Databases=@("DB1", "DB2"); ListenerName="AG1Listener"; ListenerIPAddresses=@("192.168.1.100"); IsMultiSubnet=$false; AvailabilityMode="SynchronousCommit"; FailoverMode="Automatic"; BackupPreference="Secondary"},
-        @{Name="AG2"; Databases=@("DB3"); ListenerName="AG2Listener"; ListenerIPAddresses=@("192.168.1.101", "192.168.2.101"); IsMultiSubnet=$true; AvailabilityMode="AsynchronousCommit"; FailoverMode="Manual"; BackupPreference="Primary"}
+    @{Name="AG1"; Databases=@("DB1", "DB2"); ListenerName="AG1Listener"; ListenerIPAddresses=@("192.168.1.100"); SubnetMasks=@("255.255.255.0"); IsMultiSubnet=$false; AvailabilityMode="SynchronousCommit"; FailoverMode="Automatic"; BackupPreference="Secondary"},
+    @{Name="AG2"; Databases=@("DB3"); ListenerName="AG2Listener"; ListenerIPAddresses=@("192.168.1.101", "192.168.2.101"); SubnetMasks=@("255.255.255.0", "255.255.255.0"); IsMultiSubnet=$true; AvailabilityMode="AsynchronousCommit"; FailoverMode="Manual"; BackupPreference="Primary"}
     )
 }
 
@@ -141,16 +141,17 @@ function Check-EditionForAGType {
     return $agType
 }
 
-# Function to create Availability Group
-function Create-AvailabilityGroup {
+function CreateAndConfigureAvailabilityGroup {
     param (
         [string]$PrimaryInstance,
         [string]$AGName,
         [array]$SecondaryInstances,
-        [PSCredential]$Credential
+        [PSCredential]$Credential,
+        [hashtable]$agConfig
     )
 
-    Write-Log -Message "Creating Availability Group $AGName on $PrimaryInstance." -Level "INFO"
+    Write-Log -Message "Creating and Configuring Availability Group $AGName on $PrimaryInstance." -Level "INFO"
+    
     $secondaryServers = $SecondaryInstances | ForEach-Object {
         if ($_.Instance -eq "MSSQLSERVER") { $_.HostServer } else { "$($_.HostServer)\$($_.Instance)" }
     }
@@ -162,77 +163,43 @@ function Create-AvailabilityGroup {
         Secondary = $secondaryServers
         PrimarySqlCredential = $Credential
         SecondarySqlCredential = $Credential
-        Confirm = $false
         EnableException = $true
     }
 
-    if ($agType) {
+    # Basic AG configuration
+    if ($agType -eq "Basic") {
         $agParams['Basic'] = $true
-        Write-Log -Message "Creating Basic Availability Group(s) due to SQL Server Edition." -Level "INFO"
+        Write-Log -Message "Creating Basic Availability Group due to SQL Server Edition." -Level "INFO"
+    } elseif ($agType -eq "Unsupported") {
+        Write-Log -Message "Unsupported SQL Server edition for Availability Groups." -Level "ERROR"
+        throw "Unsupported SQL Server edition for Availability Groups."
     }
+
+    # AG properties configuration
+    $agParams['AvailabilityMode'] = $agConfig.AvailabilityMode
+    $agParams['FailoverMode'] = $agConfig.FailoverMode
+    $agParams['BackupPriority'] = 50  # Example, adjust as needed
+    $agParams['ConnectionModeInPrimaryRole'] = 'AllowAllConnections'  # Adjust if needed
+    $agParams['ConnectionModeInSecondaryRole'] = 'AllowNoConnections' # Adjust if needed
+    $agParams['SeedingMode'] = 'Automatic'  # Automatic seeding, adjust if manual is preferred
+
+    # Listener configuration
+    $agParams['IPAddress'] = $agConfig.ListenerIPAddresses
+    if ($agConfig.IsMultiSubnet) {
+        $agParams['SubnetIP'] = $agConfig.ListenerIPAddresses
+        $agParams['SubnetMask'] = $agConfig.SubnetMasks
+    } else {
+        $agParams['SubnetIP'] = @($agConfig.ListenerIPAddresses[0])
+        $agParams['SubnetMask'] = @("255.255.255.0")  # Default for single subnet
+    }
+    $agParams['Port'] = if ($agConfig.ContainsKey('ListenerPort')) { $agConfig.ListenerPort } else { 1433 }
 
     try {
         New-DbaAvailabilityGroup @agParams
-        Write-Log -Message "Availability Group $AGName created successfully." -Level "SUCCESS"
+        Write-Log -Message "Availability Group $AGName created and configured successfully." -Level "SUCCESS"
     }
     catch {
-        Write-Log -Message "Failed to create Availability Group $($AGName): $_" -Level "ERROR"
-        throw
-    }
-}
-
-# Function to configure Availability Group properties
-function Configure-AvailabilityGroup {
-    param (
-        [string]$Instance,
-        [string]$AGName,
-        [PSCredential]$Credential,
-        [string]$ListenerName,
-        [string[]]$ListenerIPAddresses,
-        [int]$ListenerPort = 1433,
-        [bool]$IsMultiSubnet = $false,
-        [string]$AvailabilityMode = 'SynchronousCommit',  # SynchronousCommit or AsynchronousCommit
-        [string]$FailoverMode = 'Automatic',  # Automatic or Manual
-        [string]$BackupPreference = 'Secondary'  # Primary, Secondary, or None
-    )
-
-    Write-Log -Message "Configuring properties for Availability Group $AGName." -Level "INFO"
-
-    try {
-        # Configure Listener
-        $listenerParams = @{
-            SqlInstance = $Instance
-            AvailabilityGroup = $AGName
-            SqlCredential = $Credential
-            Name = $ListenerName
-            Port = $ListenerPort
-            EnableException = $true
-        }
-
-        if ($IsMultiSubnet) {
-            $listenerParams['IP'] = $ListenerIPAddresses
-            Add-DbaAgListener @listenerParams -EnableMultiSubnetFailover
-        } else {
-            $listenerParams['IP'] = $ListenerIPAddresses[0]  # Assuming single subnet for simplicity
-            Add-DbaAgListener @listenerParams
-        }
-        Write-Log -Message "Listener for AG $AGName configured." -Level "SUCCESS"
-
-        # Configure Availability Mode
-        Set-DbaAgReplica -SqlInstance $Instance -AvailabilityGroup $AGName -SqlCredential $Credential -AvailabilityMode $AvailabilityMode -EnableException
-        Write-Log -Message "Availability Mode set to $AvailabilityMode for AG $AGName." -Level "SUCCESS"
-
-        # Configure Failover Mode
-        Set-DbaAgReplica -SqlInstance $Instance -AvailabilityGroup $AGName -SqlCredential $Credential -FailoverMode $FailoverMode -EnableException
-        Write-Log -Message "Failover Mode set to $FailoverMode for AG $AGName." -Level "SUCCESS"
-
-        # Configure Backup Preference
-        Set-DbaAgReplica -SqlInstance $Instance -AvailabilityGroup $AGName -SqlCredential $Credential -BackupPriority 50 -ReadonlyRoutingUrl "TCP://$($Instance):$ListenerPort" -BackupPreference $BackupPreference -EnableException
-        Write-Log -Message "Backup Preference set to $BackupPreference for AG $AGName." -Level "SUCCESS"
-
-    }
-    catch {
-        Write-Log -Message "Failed to configure properties for AG $($AGName): $_" -Level "ERROR"
+        Write-Log -Message "Failed to create and configure Availability Group $($AGName): $_" -Level "ERROR"
         throw
     }
 }
@@ -358,7 +325,7 @@ try {
         Create-AvailabilityGroup -PrimaryInstance $SourceInstance -AGName $agName -SecondaryInstances $TargetInstances -Credential $myCredential
 
         # Configure AG properties including listener, availability mode, etc.
-        Configure-AvailabilityGroup -Instance $SourceInstance -AGName $agName -Credential $myCredential -ListenerName $listenerName -ListenerIPAddresses $listenerIPAddresses -IsMultiSubnet $isMultiSubnet -AvailabilityMode $availabilityMode -FailoverMode $failoverMode -BackupPreference $backupPreference
+        Configure-AvailabilityGroup -Instance $SourceInstance -AGName $agName -Credential $myCredential -agConfig $agConfig
 
         # Add databases to AG after validation
         Add-DatabasesToAG -Instance $SourceInstance -AGName $agName -Databases $databases -Credential $myCredential -NetworkShare $NetworkShare
