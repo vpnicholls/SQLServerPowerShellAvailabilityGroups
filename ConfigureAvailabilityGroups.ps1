@@ -45,7 +45,7 @@ $params = @{
     )
     NetworkShare = "\\myserver\SQLBackups"
     AGConfigurations = @(
-    @{Name="AG1"; Databases=@("DB1", "DB2"); ListenerName="AG1Listener"; ListenerIPAddresses=@("192.168.1.100"); SubnetMasks=@("255.255.255.0"); IsMultiSubnet=$false; AvailabilityMode="SynchronousCommit"; FailoverMode="Automatic"; BackupPreference="Secondary"},
+    @{Name="AG1"; Databases=@("DB1", "DB2"); ListenerName="AG1Listener"; ListenerIPAddresses=@("192.168.1.100"); SubnetMasks=@("255.255.255.0"); ListenerPort=1433; IsMultiSubnet=$false; AvailabilityMode="SynchronousCommit"; FailoverMode="Automatic"; BackupPreference="Secondary"},
     @{Name="AG2"; Databases=@("DB3"); ListenerName="AG2Listener"; ListenerIPAddresses=@("192.168.1.101", "192.168.2.101"); SubnetMasks=@("255.255.255.0", "255.255.255.0"); IsMultiSubnet=$true; AvailabilityMode="AsynchronousCommit"; FailoverMode="Manual"; BackupPreference="Primary"}
     )
 }
@@ -163,6 +163,7 @@ function CreateAvailabilityGroup {
         Secondary = $secondaryServers
         PrimarySqlCredential = $Credential
         SecondarySqlCredential = $Credential
+        Confirm = $false
         EnableException = $true
     }
 
@@ -185,13 +186,6 @@ function CreateAvailabilityGroup {
 
     # Listener configuration
     $agParams['IPAddress'] = $agConfig.ListenerIPAddresses
-    if ($agConfig.IsMultiSubnet) {
-        $agParams['SubnetIP'] = $agConfig.ListenerIPAddresses
-        $agParams['SubnetMask'] = $agConfig.SubnetMasks
-    } else {
-        $agParams['SubnetIP'] = @($agConfig.ListenerIPAddresses[0])
-        $agParams['SubnetMask'] = @("255.255.255.0")  # Default for single subnet
-    }
     $agParams['Port'] = if ($agConfig.ContainsKey('ListenerPort')) { $agConfig.ListenerPort } else { 1433 }
 
     try {
