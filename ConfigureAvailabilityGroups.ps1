@@ -104,14 +104,6 @@ if ($TargetInstances -isnot [array] -or $TargetInstances.Count -eq 0) {
     throw "Invalid TargetInstances parameter."
 }
 
-# Collect Windows Credential for each host server - Need to update this if host servers are part of domain and user is using domain credentials.
-$ServerCredentials = @{}
-$hosts = @($SourceInstance) + ($TargetInstances | ForEach-Object { $_.HostServer })
-foreach ($server in $hosts) {
-    $serverName = $server.Split('\')[0]  # Get just the server name if it's an instance
-    $ServerCredentials[$serverName] = Get-Credential -Message "Enter local admin credentials for $serverName"
-}
-
 # Function to check if server is part of a domain
 function IsServerOnDomain {
     param (
@@ -243,6 +235,14 @@ function CreateAvailabilityGroup {
         [hashtable]$agConfig
     )
 
+    if ($SecondaryInstances -isnot [array] -or $SecondaryInstances.Count -eq 0) {
+        Write-Log -Message "No secondary instances provided for AG $AGName." -Level "ERROR"
+        throw "No secondary instances provided for AG $AGName."
+    }
+    $secondaryServers = @($SecondaryInstances) | ForEach-Object {
+        if ($_.Instance -eq "MSSQLSERVER") { $_.HostServer } else { "$($_.HostServer)\$($_.Instance)" }
+    }
+    
     Write-Log -Message "Creating and Configuring Availability Group $AGName on $PrimaryInstance." -Level "INFO"
 
     Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$SecondaryInstances is $($SecondaryInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
@@ -417,6 +417,14 @@ try {
     Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$AGConfigurations is $($AGConfigurations | ConvertTo-Json -Compress)." -Level "DEBUG"
     Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$TargetInstances is $($TargetInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
 
+    # Collect Windows Credential for each host server - Need to update this if host servers are part of domain and user is using domain credentials.
+    $ServerCredentials = @{}
+    $hosts = @($SourceInstance) + ($TargetInstances | ForEach-Object { $_.HostServer })
+    foreach ($server in $hosts) {
+        $serverName = $server.Split('\')[0]  # Get just the server name if it's an instance
+        $ServerCredentials[$serverName] = Get-Credential -Message "Enter local admin credentials for $serverName"
+    }
+    
     # Ensure Always On is enabled on all instances
     $instancesToCheck = @($SourceInstance) + ($TargetInstances | ForEach-Object { if ($_.Instance -eq "MSSQLSERVER") { $_.HostServer } else { "$($_.HostServer)\$($_.Instance)" } })
     $isDomainEnvironment = $true
