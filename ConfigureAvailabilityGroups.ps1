@@ -72,13 +72,15 @@ param (
     [Parameter(Mandatory=$true)][array]$TargetInstances,
     [Parameter(Mandatory=$true)][array]$AGConfigurations,
     [Parameter(Mandatory=$true)][string]$NetworkShare,
-    [Parameter(Mandatory=$false)][bool]$EnableAndRestart = $false
+    [Parameter(Mandatory=$false)][bool]$EnableAndRestart = $false,
+    [Parameter(Mandatory=$false)][string[]]$logLevel = @("INFO", "WARNING", "ERROR", "SUCCESS", "FATAL")  # Default includes all but DEBUG
 )
 
 # Generate log file name with datetime stamp
 $logFileName = Join-Path -Path $ScriptEventLogPath -ChildPath "ConfigureAlwaysOnAGsLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
 function Write-Log {
+    [CmdletBinding()]
     param (
         [Parameter(Mandatory=$true)]
         [string]$Message,
@@ -88,11 +90,16 @@ function Write-Log {
         [string]$Level = "INFO"
     )
     
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "$timestamp [$Level] $Message" | Out-File -FilePath $logFileName -Append
+    if ($Level -in $logLevel) {  # Check if the log level is in the allowed levels
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        "$timestamp [$Level] $Message" | Out-File -FilePath $logFileName -Append
+    }
 }
 
-# Collect Windows Credential for each host server
+Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$AGConfigurations is $($AGConfigurations | ConvertTo-Json -Compress)." -Level "DEBUG"
+Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$TargetInstances is $($TargetInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
+
+# Collect Windows Credential for each host server - Need to update this if host servers are part of domain and user is using domain credentials.
 $ServerCredentials = @{}
 $hosts = @($SourceInstance) + ($TargetInstances | ForEach-Object { $_.HostServer })
 foreach ($server in $hosts) {
@@ -232,10 +239,19 @@ function CreateAvailabilityGroup {
     )
 
     Write-Log -Message "Creating and Configuring Availability Group $AGName on $PrimaryInstance." -Level "INFO"
+
+    Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$SecondaryInstances is $($SecondaryInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
     
+    if ($null -eq $SecondaryInstances -or $SecondaryInstances.Count -eq 0) {
+        Write-Log -Message "No secondary instances provided for AG $AGName." -Level "ERROR"
+        throw "No secondary instances provided for AG $AGName."
+    }
+
     $secondaryServers = $SecondaryInstances | ForEach-Object {
         if ($_.Instance -eq "MSSQLSERVER") { $_.HostServer } else { "$($_.HostServer)\$($_.Instance)" }
     }
+
+    Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$SecondaryInstances is $($SecondaryInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
 
     $agType = Check-EditionForAGType -Instance $PrimaryInstance -Credential $Credential
     $agParams = @{
@@ -247,6 +263,8 @@ function CreateAvailabilityGroup {
         Confirm = $false
         EnableException = $true
     }
+
+    Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$SecondaryInstances is $($SecondaryInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
 
     # Basic AG configuration
     if ($agType -eq "Basic") {
@@ -391,6 +409,9 @@ function Test-Failover {
 
 # Main execution
 try {
+    Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$AGConfigurations is $($AGConfigurations | ConvertTo-Json -Compress)." -Level "DEBUG"
+    Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$TargetInstances is $($TargetInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
+
     # Ensure Always On is enabled on all instances
     $instancesToCheck = @($SourceInstance) + ($TargetInstances | ForEach-Object { if ($_.Instance -eq "MSSQLSERVER") { $_.HostServer } else { "$($_.HostServer)\$($_.Instance)" } })
     $isDomainEnvironment = $true
@@ -426,6 +447,9 @@ try {
         }
     }
 
+    Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$AGConfigurations is $($AGConfigurations | ConvertTo-Json -Compress)." -Level "DEBUG"
+    Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$TargetInstances is $($TargetInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
+    
     # If not in a domain environment, check for certificate-based authentication
     if (-not $isDomainEnvironment) {
         foreach ($instance in $instancesToCheck) {
@@ -439,6 +463,9 @@ try {
             }
         }
     }
+
+    Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$AGConfigurations is $($AGConfigurations | ConvertTo-Json -Compress)." -Level "DEBUG"
+    Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$TargetInstances is $($TargetInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
 
     # Process each AG configuration
     foreach ($agConfig in $AGConfigurations) {
@@ -454,6 +481,9 @@ try {
             continue
         }
 
+        Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$AGConfigurations is $($AGConfigurations | ConvertTo-Json -Compress)." -Level "DEBUG"
+        Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$TargetInstances is $($TargetInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
+
         # Check the edition to determine AG type
         $agType = Check-EditionForAGType -Instance $SourceInstance -Credential $myCredential
 
@@ -465,6 +495,11 @@ try {
 
         # Add databases to AG after validation
         Add-DatabasesToAG -Instance $SourceInstance -AGName $agName -Databases $databases -Credential $myCredential -NetworkShare $NetworkShare
+
+        Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$AGConfigurations is $($AGConfigurations | ConvertTo-Json -Compress)." -Level "DEBUG"
+        Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$TargetInstances is $($TargetInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
+
+        Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$allInstances is $($allInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
 
         # Test failover and failback for each AG
         try {
