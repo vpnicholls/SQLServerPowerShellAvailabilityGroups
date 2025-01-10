@@ -341,7 +341,7 @@ try {
     if (-not $isDomainEnvironment) {
         foreach ($instance in $instancesToCheck) {
             $serverName = $instance.Split('\')[0]
-            $serviceAccount = (Get-DbaSqlService -ComputerName $serverName -SqlCredential $myCredential | Where-Object {$_.ServiceType -eq 'Engine'}).ServiceAccount
+            $serviceAccount = (Get-DbaService -ComputerName $serverName -SqlCredential $myCredential | Where-Object {$_.ServiceType -eq 'Engine'}).StartName
             if ($serviceAccount -like "NT*") {
                 if (-not (CheckCertificateAuthForHADR -Instance $instance -Credential $myCredential)) {
                     Write-Log -Message "Certificate-based authentication is not configured for HADR on $instance. This is required when using built-in accounts in a workgroup environment." -Level "FATAL"
