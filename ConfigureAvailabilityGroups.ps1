@@ -79,6 +79,16 @@ param (
 # Generate log file name with datetime stamp
 $logFileName = Join-Path -Path $ScriptEventLogPath -ChildPath "ConfigureAlwaysOnAGsLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
+if ($TargetInstances -isnot [array]) {
+    Write-Log -Message "TargetInstances must be an array. Received: $($TargetInstances | ConvertTo-Json -Compress)." -Level "ERROR"
+    throw "Invalid TargetInstances parameter. Must be an array."
+}
+
+if ($TargetInstances.Count -eq 0) {
+    Write-Log -Message "TargetInstances array is empty." -Level "ERROR"
+    throw "No target instances specified."
+}
+
 function Write-Log {
     [CmdletBinding()]
     param (
