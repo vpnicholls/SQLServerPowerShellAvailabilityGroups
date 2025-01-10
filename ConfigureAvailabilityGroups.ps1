@@ -141,7 +141,7 @@ function Check-EditionForAGType {
     return $agType
 }
 
-function CreateAndConfigureAvailabilityGroup {
+function CreateAvailabilityGroup {
     param (
         [string]$PrimaryInstance,
         [string]$AGName,
@@ -311,21 +311,12 @@ try {
     foreach ($agConfig in $AGConfigurations) {
         $agName = $agConfig.Name
         $databases = $agConfig.Databases
-        $listenerName = $agConfig.ListenerName
-        $listenerIPAddresses = $agConfig.ListenerIPAddresses
-        $isMultiSubnet = $agConfig.IsMultiSubnet -as [bool]
-        $availabilityMode = if ($null -ne $agConfig.AvailabilityMode) { $agConfig.AvailabilityMode } else { 'SynchronousCommit' }
-        $failoverMode = if ($null -ne $agConfig.FailoverMode) { $agConfig.FailoverMode } else { 'Automatic' }
-        $backupPreference = if ($null -ne $agConfig.BackupPreference) { $agConfig.BackupPreference } else { 'Primary' }
 
         # Check the edition to determine AG type
         $agType = Check-EditionForAGType -Instance $SourceInstance -Credential $myCredential
 
-        # Create Availability Group
-        Create-AvailabilityGroup -PrimaryInstance $SourceInstance -AGName $agName -SecondaryInstances $TargetInstances -Credential $myCredential
-
-        # Configure AG properties including listener, availability mode, etc.
-        Configure-AvailabilityGroup -Instance $SourceInstance -AGName $agName -Credential $myCredential -agConfig $agConfig
+        # Create and Configure Availability Group
+        CreateAvailabilityGroup -PrimaryInstance $SourceInstance -AGName $agName -SecondaryInstances $TargetInstances -Credential $myCredential -agConfig $agConfig
 
         # Add databases to AG after validation
         Add-DatabasesToAG -Instance $SourceInstance -AGName $agName -Databases $databases -Credential $myCredential -NetworkShare $NetworkShare
