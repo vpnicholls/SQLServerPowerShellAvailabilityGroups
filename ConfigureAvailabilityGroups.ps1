@@ -353,6 +353,11 @@ function Test-Failover {
         [PSCredential]$Credential
     )
 
+    if ($null -eq $Instances -or $Instances.Count -eq 0) {
+        Write-Log -Message "No instances provided for failover testing of AG $AGName." -Level "WARNING"
+        return
+    }
+
     foreach ($instance in $Instances) {
         $instanceName = if ($instance.Instance -eq "MSSQLSERVER") { $instance.HostServer } else { "$($instance.HostServer)\$($instance.Instance)" }
         
@@ -362,14 +367,14 @@ function Test-Failover {
 
             # Initiate failover
             $failoverTime = Measure-Command {
-                Invoke-DbaAgFailover -SqlInstance $instanceName -AvailabilityGroup $AGName -SqlCredential $Credential -Confirm False -EnableException
+                Invoke-DbaAgFailover -SqlInstance $instanceName -AvailabilityGroup $AGName -SqlCredential $Credential -Confirm:$false -EnableException
             }
             Write-Log -Message "Failover to $instanceName completed in $($failoverTime.TotalSeconds) seconds." -Level "SUCCESS"
 
             # Initiate failback to the original primary
             Write-Log -Message "Initiating failback to $SourceInstance for Availability Group $AGName." -Level "INFO"
             $failbackTime = Measure-Command {
-                Invoke-DbaAgFailover -SqlInstance $SourceInstance -AvailabilityGroup $AGName -SqlCredential $Credential -Confirm False -EnableException
+                Invoke-DbaAgFailover -SqlInstance $SourceInstance -AvailabilityGroup $AGName -SqlCredential $Credential -Confirm:$false -EnableException
             }
             Write-Log -Message "Failback to $SourceInstance completed in $($failbackTime.TotalSeconds) seconds." -Level "SUCCESS"
 
@@ -379,7 +384,7 @@ function Test-Failover {
 
             # Additional health check after failback
             $healthCheckTime = Measure-Command {
-                Test-DbaAvailabilityGroup -SqlInstance $SourceInstance -AvailabilityGroup $AGName -SqlCredential $Credential -Confirm False -EnableException
+                Test-DbaAvailabilityGroup -SqlInstance $SourceInstance -AvailabilityGroup $AGName -SqlCredential $Credential -Confirm:$false -EnableException
             }
             Write-Log -Message "Health check after failback completed in $($healthCheckTime.TotalSeconds) seconds." -Level "INFO"
         }
@@ -470,7 +475,11 @@ try {
         # Test failover and failback for each AG
         try {
             $allInstances = @($TargetInstances) + @(@{HostServer=$SourceInstance; Instance="MSSQLSERVER"})
-            Test-Failover -AGName $agName -Instances $allInstances -Credential $myCredential
+            if ($allInstances -and $allInstances.Count -gt 0) {  # Check if $allInstances is not null and has elements
+                Test-Failover -AGName $agName -Instances $allInstances -Credential $myCredential
+            } else {
+                Write-Log -Message "No instances found to test failover for AG $agName." -Level "WARNING"
+            }
         } catch {
             Write-Log -Message "Failover test for AG $agName failed: $_" -Level "WARNING"
         }
