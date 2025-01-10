@@ -99,6 +99,11 @@ function Write-Log {
 Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$AGConfigurations is $($AGConfigurations | ConvertTo-Json -Compress)." -Level "DEBUG"
 Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$TargetInstances is $($TargetInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
 
+if ($TargetInstances -isnot [array] -or $TargetInstances.Count -eq 0) {
+    Write-Log -Message "TargetInstances must be an array with at least one element." -Level "ERROR"
+    throw "Invalid TargetInstances parameter."
+}
+
 # Collect Windows Credential for each host server - Need to update this if host servers are part of domain and user is using domain credentials.
 $ServerCredentials = @{}
 $hosts = @($SourceInstance) + ($TargetInstances | ForEach-Object { $_.HostServer })
