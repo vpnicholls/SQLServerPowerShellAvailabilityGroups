@@ -246,17 +246,6 @@ function CreateAvailabilityGroup {
     Write-Log -Message "Creating and Configuring Availability Group $AGName on $PrimaryInstance." -Level "INFO"
 
     Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$SecondaryInstances is $($SecondaryInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
-    
-    if ($null -eq $SecondaryInstances -or $SecondaryInstances.Count -eq 0) {
-        Write-Log -Message "No secondary instances provided for AG $AGName." -Level "ERROR"
-        throw "No secondary instances provided for AG $AGName."
-    }
-
-    $secondaryServers = $SecondaryInstances | ForEach-Object {
-        if ($_.Instance -eq "MSSQLSERVER") { $_.HostServer } else { "$($_.HostServer)\$($_.Instance)" }
-    }
-
-    Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$SecondaryInstances is $($SecondaryInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
 
     $agType = Check-EditionForAGType -Instance $PrimaryInstance -Credential $Credential
     $agParams = @{
@@ -501,6 +490,7 @@ try {
         $agType = Check-EditionForAGType -Instance $SourceInstance -Credential $myCredential
 
         # Create and Configure Availability Group
+        Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): Before creating AG $agName, secondary instances are: $($TargetInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
         CreateAvailabilityGroup -PrimaryInstance $SourceInstance -AGName $agName -SecondaryInstances $TargetInstances -Credential $myCredential -agConfig $agConfig
 
         # Before adding databases to AG
@@ -513,6 +503,7 @@ try {
         Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$TargetInstances is $($TargetInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
 
         Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$allInstances is $($allInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
+        Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): All Instances for testing are: $($allInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
 
         # Test failover and failback for each AG
         try {
