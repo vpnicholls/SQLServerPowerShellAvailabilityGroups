@@ -37,7 +37,6 @@ A boolean, where $true instructs the script to attempt to enable the Always On f
 Use $False if you've already had the the feature enabled and services restarted by other means.
 
 .EXAMPLE
-# First, set $params
 $params = @{
     myCredential = (Get-Credential -Message "Please enter your password for the SQL Server instances.")
     ScriptEventLogPath = "$env:userprofile\Documents\Scripts\PowerShell\Migration\Logs"
@@ -72,25 +71,13 @@ param (
     [Parameter(Mandatory=$true)][array]$TargetInstances,
     [Parameter(Mandatory=$true)][array]$AGConfigurations,
     [Parameter(Mandatory=$true)][string]$NetworkShare,
-    [Parameter(Mandatory=$false)][bool]$EnableAndRestart = $false,
-    [Parameter(Mandatory=$false)][string[]]$logLevel = @("INFO", "WARNING", "ERROR", "SUCCESS", "FATAL")  # Default includes all but DEBUG
+    [Parameter(Mandatory=$false)][bool]$EnableAndRestart = $false
 )
 
 # Generate log file name with datetime stamp
 $logFileName = Join-Path -Path $ScriptEventLogPath -ChildPath "ConfigureAlwaysOnAGsLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
-if ($TargetInstances -isnot [array]) {
-    Write-Log -Message "TargetInstances must be an array. Received: $($TargetInstances | ConvertTo-Json -Compress)." -Level "ERROR"
-    throw "Invalid TargetInstances parameter. Must be an array."
-}
-
-if ($TargetInstances.Count -eq 0) {
-    Write-Log -Message "TargetInstances array is empty." -Level "ERROR"
-    throw "No target instances specified."
-}
-
 function Write-Log {
-    [CmdletBinding()]
     param (
         [Parameter(Mandatory=$true)]
         [string]$Message,
@@ -100,18 +87,23 @@ function Write-Log {
         [string]$Level = "INFO"
     )
     
-    if ($Level -in $logLevel) {  # Check if the log level is in the allowed levels
-        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-        "$timestamp [$Level] $Message" | Out-File -FilePath $logFileName -Append
-    }
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$timestamp [$Level] $Message" | Out-File -FilePath $logFileName -Append
 }
 
-Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$AGConfigurations is $($AGConfigurations | ConvertTo-Json -Compress)." -Level "DEBUG"
-Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$TargetInstances is $($TargetInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
+# Collect Windows Credential only if needed
+#if ($EnableAndRestart) {
+#    $WindowsCredential = Get-Credential -Message "Please enter your password for the Windows Hosts. Needed for service restart."
+#} else {
+#    Write-Log -Message "Windows credential not required as service restart is disabled." -Level "INFO"
+#}
 
-if ($TargetInstances -isnot [array] -or $TargetInstances.Count -eq 0) {
-    Write-Log -Message "TargetInstances must be an array with at least one element." -Level "ERROR"
-    throw "Invalid TargetInstances parameter."
+# Collect Windows Credential for each host server
+$ServerCredentials = @{}
+$hosts = @($SourceInstance) + ($TargetInstances | ForEach-Object { $_.HostServer })
+foreach ($server in $hosts) {
+    $serverName = $server.Split('\')[0]  # Get just the server name if it's an instance
+    $ServerCredentials[$serverName] = Get-Credential -Message "Enter local admin credentials for $serverName"
 }
 
 # Function to check if server is part of a domain
@@ -245,17 +237,11 @@ function CreateAvailabilityGroup {
         [hashtable]$agConfig
     )
 
-    if ($SecondaryInstances -isnot [array] -or $SecondaryInstances.Count -eq 0) {
-        Write-Log -Message "No secondary instances provided for AG $AGName." -Level "ERROR"
-        throw "No secondary instances provided for AG $AGName."
-    }
-    $secondaryServers = @($SecondaryInstances) | ForEach-Object {
+    Write-Log -Message "Creating and Configuring Availability Group $AGName on $PrimaryInstance." -Level "INFO"
+    
+    $secondaryServers = $SecondaryInstances | ForEach-Object {
         if ($_.Instance -eq "MSSQLSERVER") { $_.HostServer } else { "$($_.HostServer)\$($_.Instance)" }
     }
-    
-    Write-Log -Message "Creating and Configuring Availability Group $AGName on $PrimaryInstance." -Level "INFO"
-
-    Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$SecondaryInstances is $($SecondaryInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
 
     $agType = Check-EditionForAGType -Instance $PrimaryInstance -Credential $Credential
     $agParams = @{
@@ -267,8 +253,6 @@ function CreateAvailabilityGroup {
         Confirm = $false
         EnableException = $true
     }
-
-    Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$SecondaryInstances is $($SecondaryInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
 
     # Basic AG configuration
     if ($agType -eq "Basic") {
@@ -285,7 +269,7 @@ function CreateAvailabilityGroup {
     $agParams['BackupPriority'] = 50  # Example, adjust as needed
     $agParams['ConnectionModeInPrimaryRole'] = 'AllowAllConnections'  # Adjust if needed
     $agParams['ConnectionModeInSecondaryRole'] = 'AllowNoConnections' # Adjust if needed
-    $agParams['SeedingMode'] = 'Manual'
+    $agParams['SeedingMode'] = 'Automatic'  # Automatic seeding, adjust if manual is preferred
 
     # Listener configuration
     $agParams['IPAddress'] = $agConfig.ListenerIPAddresses
@@ -296,7 +280,7 @@ function CreateAvailabilityGroup {
         Write-Log -Message "Availability Group $AGName created and configured successfully." -Level "SUCCESS"
     }
     catch {
-        Write-Log -Message "Failed to create and configure Availability Group ${AGName}: ${_}" -Level "ERROR"
+        Write-Log -Message "Failed to create and configure Availability Group $($AGName): $_" -Level "ERROR"
         throw
     }
 }
@@ -308,8 +292,7 @@ function Add-DatabasesToAG {
         [string]$AGName,
         [string[]]$Databases,
         [PSCredential]$Credential,
-        [string]$NetworkShare,
-        [ValidateSet('Manual', 'Automatic')][string]$SeedingMode
+        [string]$NetworkShare
     )
 
     # Check if databases exist
@@ -317,45 +300,21 @@ function Add-DatabasesToAG {
     $missingDbs = $Databases | Where-Object { $_ -notin $existingDbs.Name }
 
     if ($missingDbs) {
-        Write-Log -Message "The following databases do not exist on ${Instance}: ($($missingDbs -join ', '))." -Level "ERROR"
+        Write-Log -Message "The following databases do not exist on $($Instance): ($($missingDbs -join ', '))." -Level "ERROR"
         throw "Database validation failed for AG $AGName."
     }
 
     foreach ($db in $Databases) {
-        Write-Log -Message "Adding database $db to Availability Group $AGName with ${SeedingMode} seeding." -Level "INFO"
+        Write-Log -Message "Adding database $db to Availability Group $AGName." -Level "INFO"
         try {
-            if ($SeedingMode -eq 'Automatic') {
-                # Automatic seeding - SQL Server handles synchronization
-                $joinResult = Add-DbaAgDatabase -SqlInstance $Instance -Database $db -AvailabilityGroup $AGName -SqlCredential $Credential -EnableException
-                Write-Log -Message "Database $db automatically seeded and joined to Availability Group $AGName successfully." -Level "SUCCESS"
-            }
-            else {  # Manual seeding
-                # Backup on primary
-                $backupResult = Backup-DbaDatabase -SqlInstance $Instance -Database $db -SqlCredential $Credential -Path $NetworkShare -Type Full -EnableException
-                Write-Log -Message "Database $db backed up successfully." -Level "INFO"
+            $backupResult = Backup-DbaDatabase -SqlInstance $Instance -Database $db -SqlCredential $Credential -Path $NetworkShare -Type Full -EnableException
+            Write-Log -Message "Database $db backed up successfully." -Level "INFO"
 
-                # Restore on secondaries with NORECOVERY
-                $secondaryInstances = $TargetInstances | ForEach-Object { if ($_.Instance -eq "MSSQLSERVER") { $_.HostServer } else { "$($_.HostServer)\$($_.Instance)" } }
-                foreach ($secondary in $secondaryInstances) {
-                    $restoreParams = @{
-                        SqlInstance = $secondary
-                        SqlCredential = $Credential
-                        Database = $db
-                        Path = $NetworkShare
-                        NoRecovery = $true
-                        EnableException = $true
-                    }
-                    Restore-DbaDatabase @restoreParams
-                    Write-Log -Message "Database $db restored on secondary ${secondary} with NORECOVERY." -Level "INFO"
-                }
-
-                # Join the database to AG
-                $joinResult = Add-DbaAgDatabase -SqlInstance $Instance -Database $db -AvailabilityGroup $AGName -SqlCredential $Credential -EnableException
-                Write-Log -Message "Database $db manually seeded and joined to Availability Group $AGName successfully." -Level "SUCCESS"
-            }
+            $joinResult = Add-DbaAgDatabase -SqlInstance $Instance -Database $db -AvailabilityGroup $AGName -SqlCredential $Credential -SharedPath $NetworkShare -EnableException
+            Write-Log -Message "Database $db added to Availability Group $AGName successfully." -Level "SUCCESS"
         }
         catch {
-            Write-Log -Message "Failed to add database $db to Availability Group ${AGName} with ${SeedingMode} seeding: ${_}" -Level "ERROR"
+            Write-Log -Message "Failed to add database $db to Availability Group $($AGName): $_" -Level "ERROR"
             throw
         }
     }
@@ -369,11 +328,6 @@ function Test-Failover {
         [PSCredential]$Credential
     )
 
-    if ($null -eq $Instances -or $Instances.Count -eq 0) {
-        Write-Log -Message "No instances provided for failover testing of AG $AGName." -Level "WARNING"
-        return
-    }
-
     foreach ($instance in $Instances) {
         $instanceName = if ($instance.Instance -eq "MSSQLSERVER") { $instance.HostServer } else { "$($instance.HostServer)\$($instance.Instance)" }
         
@@ -383,14 +337,14 @@ function Test-Failover {
 
             # Initiate failover
             $failoverTime = Measure-Command {
-                Invoke-DbaAgFailover -SqlInstance $instanceName -AvailabilityGroup $AGName -SqlCredential $Credential -Confirm:$false -EnableException
+                Invoke-DbaAgFailover -SqlInstance $instanceName -AvailabilityGroup $AGName -SqlCredential $Credential -EnableException
             }
             Write-Log -Message "Failover to $instanceName completed in $($failoverTime.TotalSeconds) seconds." -Level "SUCCESS"
 
             # Initiate failback to the original primary
             Write-Log -Message "Initiating failback to $SourceInstance for Availability Group $AGName." -Level "INFO"
             $failbackTime = Measure-Command {
-                Invoke-DbaAgFailover -SqlInstance $SourceInstance -AvailabilityGroup $AGName -SqlCredential $Credential -Confirm:$false -EnableException
+                Invoke-DbaAgFailover -SqlInstance $SourceInstance -AvailabilityGroup $AGName -SqlCredential $Credential -EnableException
             }
             Write-Log -Message "Failback to $SourceInstance completed in $($failbackTime.TotalSeconds) seconds." -Level "SUCCESS"
 
@@ -400,7 +354,7 @@ function Test-Failover {
 
             # Additional health check after failback
             $healthCheckTime = Measure-Command {
-                Test-DbaAvailabilityGroup -SqlInstance $SourceInstance -AvailabilityGroup $AGName -SqlCredential $Credential -Confirm:$false -EnableException
+                Test-DbaAvailabilityGroup -SqlInstance $SourceInstance -AvailabilityGroup $AGName -SqlCredential $Credential -EnableException
             }
             Write-Log -Message "Health check after failback completed in $($healthCheckTime.TotalSeconds) seconds." -Level "INFO"
         }
@@ -413,17 +367,6 @@ function Test-Failover {
 
 # Main execution
 try {
-    Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$AGConfigurations is $($AGConfigurations | ConvertTo-Json -Compress)." -Level "DEBUG"
-    Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$TargetInstances is $($TargetInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
-
-    # Collect Windows Credential for each host server - Need to update this if host servers are part of domain and user is using domain credentials.
-    $ServerCredentials = @{}
-    $hosts = @($SourceInstance) + ($TargetInstances | ForEach-Object { $_.HostServer })
-    foreach ($server in $hosts) {
-        $serverName = $server.Split('\')[0]  # Get just the server name if it's an instance
-        $ServerCredentials[$serverName] = Get-Credential -Message "Enter local admin credentials for $serverName"
-    }
-    
     # Ensure Always On is enabled on all instances
     $instancesToCheck = @($SourceInstance) + ($TargetInstances | ForEach-Object { if ($_.Instance -eq "MSSQLSERVER") { $_.HostServer } else { "$($_.HostServer)\$($_.Instance)" } })
     $isDomainEnvironment = $true
@@ -459,9 +402,6 @@ try {
         }
     }
 
-    Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$AGConfigurations is $($AGConfigurations | ConvertTo-Json -Compress)." -Level "DEBUG"
-    Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$TargetInstances is $($TargetInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
-    
     # If not in a domain environment, check for certificate-based authentication
     if (-not $isDomainEnvironment) {
         foreach ($instance in $instancesToCheck) {
@@ -476,62 +416,26 @@ try {
         }
     }
 
-    Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$AGConfigurations is $($AGConfigurations | ConvertTo-Json -Compress)." -Level "DEBUG"
-    Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$TargetInstances is $($TargetInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
-
     # Process each AG configuration
     foreach ($agConfig in $AGConfigurations) {
         $agName = $agConfig.Name
         $databases = $agConfig.Databases
-        $seedingMode = $agParams['SeedingMode']  # Assuming $agParams is still in scope
-
-        # Check if AG already exists
-        $existingAGs = Get-DbaAvailabilityGroup -SqlInstance $SourceInstance -SqlCredential $myCredential | Select-Object -ExpandProperty Name
-        if ($agName -in $existingAGs) {
-            Write-Log -Message "Availability Group $agName already exists. Skipping creation." -Level "INFO"
-            # You might want to check the configuration state here in the future
-            continue
-        }
-
-        Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$AGConfigurations is $($AGConfigurations | ConvertTo-Json -Compress)." -Level "DEBUG"
-        Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$TargetInstances is $($TargetInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
 
         # Check the edition to determine AG type
         $agType = Check-EditionForAGType -Instance $SourceInstance -Credential $myCredential
 
         # Create and Configure Availability Group
-        Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): Before creating AG $agName, secondary instances are: $($TargetInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
         CreateAvailabilityGroup -PrimaryInstance $SourceInstance -AGName $agName -SecondaryInstances $TargetInstances -Credential $myCredential -agConfig $agConfig
 
         # Before adding databases to AG
         EnsureDatabasesInFullRecoveryMode -Instance $SourceInstance -Credential $myCredential -Databases $databases
 
         # Add databases to AG after validation
-        Add-DatabasesToAG -Instance $SourceInstance -AGName $agName -Databases $databases -Credential $myCredential -NetworkShare $NetworkShare
-
-        Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$AGConfigurations is $($AGConfigurations | ConvertTo-Json -Compress)." -Level "DEBUG"
-        Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$TargetInstances is $($TargetInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
-
-        Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): The value of `$allInstances is $($allInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
-        Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): All Instances for testing are: $($allInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
+        Add-DatabasesToAG -Instance $SourceInstance -AGName $agName -Databases $databases -Credential $myCredential -NetworkShare $NetworkShare | Out-Null
 
         # Test failover and failback for each AG
-        try {
-            if ($null -eq $TargetInstances -or $TargetInstances.Count -eq 0) {
-                Write-Log -Message "TargetInstances is null or empty when trying to test failover for AG $agName." -Level "ERROR"
-                throw "No target instances provided for failover testing."
-            }
-            $allInstances = @($TargetInstances) + @(@{HostServer=$SourceInstance; Instance="MSSQLSERVER"})
-            Write-Log -Message "Line $($PSCmdlet.MyInvocation.ScriptLineNumber): After creating `$allInstances, its value is: $($allInstances | ConvertTo-Json -Compress)." -Level "DEBUG"
-    
-            if ($allInstances -and $allInstances.Count -gt 0) {  # Check if $allInstances is not null and has elements
-                Test-Failover -AGName $agName -Instances $allInstances -Credential $myCredential
-            } else {
-                Write-Log -Message "No instances found to test failover for AG $agName." -Level "WARNING"
-            }
-        } catch {
-            Write-Log -Message "Failover test for AG $agName failed: $_" -Level "WARNING"
-        }
+        $allInstances = @($TargetInstances) + @(@{HostServer=$SourceInstance; Instance="MSSQLSERVER"})
+        Test-Failover -AGName $agName -Instances $allInstances -Credential $myCredential -Confirm False
     }
 
     Write-Log -Message "All Availability Groups configuration, testing completed." -Level "SUCCESS"
