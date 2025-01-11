@@ -82,6 +82,7 @@ param (
 # Generate log file name with datetime stamp
 $logFileName = Join-Path -Path $ScriptEventLogPath -ChildPath "ConfigureAlwaysOnAGsLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
+# Define function for log writer
 function Write-Log {
     param (
         [Parameter(Mandatory=$true)]
@@ -111,7 +112,7 @@ foreach ($server in $hosts) {
     $ServerCredentials[$serverName] = Get-Credential -Message "Enter local admin credentials for $serverName"
 }
 
-# Function to check if server is part of a domain
+# Define function to check if server is part of a domain
 function IsServerOnDomain {
     param (
         [string]$ServerName
@@ -149,6 +150,7 @@ function CheckCertificateAuthForHADR {
     }
 }
 
+# Define function to check that all databases are in FULL recovery mode
 function EnsureDatabasesInFullRecoveryMode {
     param (
         [string]$Instance,
@@ -175,7 +177,9 @@ function EnsureDatabasesInFullRecoveryMode {
                 $alterQuery = "ALTER DATABASE [$db] SET RECOVERY FULL;"
                 $result = Invoke-DbaQuery -SqlInstance $Instance -SqlCredential $Credential -Query $alterQuery -EnableException
                 Write-Log -Message "Database $db recovery model set to FULL." -Level "SUCCESS"
-            } 
+            } else {
+                Write-Log -Message "Database $db is already in FULL recovery mode." -Level "INFO"
+            }
         }
         catch {
             Write-Log -Message "Failed to ensure FULL recovery mode for database $db on $($Instance): $_" -Level "ERROR"
@@ -187,6 +191,24 @@ function EnsureDatabasesInFullRecoveryMode {
 }
 
 # Function to check and enable Always On if not enabled
+function Enable-AlwaysOn {
+    param (
+        [string]$Instance,
+        [PSCredential]$SqlCredential
+    )
+
+    Write-Log -Message "Checking if Always On is enabled on $Instance." -Level "INFO"
+    $isHadrEnabled = Invoke-DbaQuery -SqlInstance $Instance -SqlCredential $SqlCredential -Query "SELECT SERVERPROPERTY('IsHadrEnabled');" | Select-Object -ExpandProperty Column1
+
+    if (-not $isHadrEnabled) {
+        Write-Log -Message "Always On is not enabled on $Instance. Manual configuration required." -Level "WARNING"
+        throw "HADR is not enabled on $Instance. Please enable it manually and restart the service."
+    } else {
+        Write-Log -Message "Always On is already enabled on $Instance." -Level "INFO"
+    }
+}
+
+# Define function to decide which type of Availability group will be created, based on SQL Server Edition
 function Check-EditionForAGType {
     param (
         [string]$Instance,
@@ -217,6 +239,7 @@ function Check-EditionForAGType {
     return $agType
 }
 
+# Define function to create the Availability Group
 function CreateAvailabilityGroup {
     param (
         [string]$PrimaryInstance,
@@ -244,9 +267,9 @@ function CreateAvailabilityGroup {
     }
 
     # Basic AG configuration
-    if (-not $alreadyLoggedBasicAG) {
-        Write-Log -Message "All Availability Groups will be Basic due to SQL Server Edition." -Level "INFO"
-        $script:alreadyLoggedBasicAG = $true
+    if ($agType -eq "Basic") {
+        $agParams['Basic'] = $true
+        Write-Log -Message "Creating Basic Availability Group due to SQL Server Edition." -Level "INFO"
     } elseif ($agType -eq "Unsupported") {
         Write-Log -Message "Unsupported SQL Server edition for Availability Groups." -Level "ERROR"
         throw "Unsupported SQL Server edition for Availability Groups."
@@ -318,6 +341,7 @@ try {
     $instancesToCheck = @($SourceInstance) + ($TargetInstances | ForEach-Object { if ($_.Instance -eq "MSSQLSERVER") { $_.HostServer } else { "$($_.HostServer)\$($_.Instance)" } })
     $isDomainEnvironment = $true
     foreach ($instance in $instancesToCheck) {
+        Write-Log -Message "Debug: Instance being checked: $instance" -Level "DEBUG"
         $serverName = $instance.Split('\')[0]
         if ($EnableAndRestart) {
             # Check and enable HADR if necessary
@@ -368,11 +392,9 @@ try {
         $databases = $agConfig.Databases
 
         # Check the edition to determine AG type
-        $script:alreadyLoggedEdition = $false
         $agType = Check-EditionForAGType -Instance $SourceInstance -Credential $myCredential
 
         # Create and Configure Availability Group
-        $script:alreadyLoggedBasicAG = $false
         CreateAvailabilityGroup -PrimaryInstance $SourceInstance -AGName $agName -SecondaryInstances $TargetInstances -Credential $myCredential -agConfig $agConfig
 
         # Before adding databases to AG
