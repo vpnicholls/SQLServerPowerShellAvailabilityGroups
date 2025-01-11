@@ -11,8 +11,9 @@ This script:
 - Creates the associated Availability Group Listeners.
 - Adds specified databases to their corresponding Availability Groups.
 - Configures replicas.
-- Performs failover and failback tests for each AG.
 - Validates database existence before adding them to AGs.
+
+It does not test or benchmark failovers. This will be deevloped in a separate script.
 
 .PARAMETER myCredential
 Credentials used to connect to SQL Server instances.
@@ -56,13 +57,17 @@ $params = @{
 .\ConfigureAvailabilityGroups.ps1 @params
 
 .NOTES
-- Ensure SQL Server instances are prepared for Always On (Windows Server Failover Clustering, matching SQL Server versions, etc.).
+- Ensure SQL Server instances are prepared for Always On (Windows Server Failover Clustering, matching SQL Server versions, matching drive layouts, etc.).
 - The script assumes that SQL Server instances have been joined to the same WSFC and have the necessary permissions.
 - The script will attempt to enable Always On on the instances if not already enabled.
 - Backup and restore operations are used to seed data to secondary replicas; ensure permissions and connectivity are correctly set up.
 #>
 
 #requires -module dbatools
+
+#################
+### The Setup ###
+#################
 
 param (
     [Parameter(Mandatory=$true)][PSCredential]$myCredential,
@@ -320,52 +325,10 @@ function Add-DatabasesToAG {
     }
 }
 
-# Function to test failover and failback for an AG, recording time taken for each state change, to provide a benchmark for failovers
-function Test-Failover {
-    param (
-        [string]$AGName,
-        [array]$Instances,
-        [PSCredential]$Credential
-    )
+######################
+### Main execution ###
+######################
 
-    foreach ($instance in $Instances) {
-        $instanceName = if ($instance.Instance -eq "MSSQLSERVER") { $instance.HostServer } else { "$($instance.HostServer)\$($instance.Instance)" }
-        
-        Write-Log -Message "Initiating failover to $instanceName for Availability Group $AGName." -Level "INFO"
-        try {
-            $failoverStart = Get-Date
-
-            # Initiate failover
-            $failoverTime = Measure-Command {
-                Invoke-DbaAgFailover -SqlInstance $instanceName -AvailabilityGroup $AGName -SqlCredential $Credential -EnableException
-            }
-            Write-Log -Message "Failover to $instanceName completed in $($failoverTime.TotalSeconds) seconds." -Level "SUCCESS"
-
-            # Initiate failback to the original primary
-            Write-Log -Message "Initiating failback to $SourceInstance for Availability Group $AGName." -Level "INFO"
-            $failbackTime = Measure-Command {
-                Invoke-DbaAgFailover -SqlInstance $SourceInstance -AvailabilityGroup $AGName -SqlCredential $Credential -EnableException
-            }
-            Write-Log -Message "Failback to $SourceInstance completed in $($failbackTime.TotalSeconds) seconds." -Level "SUCCESS"
-
-            # Total time for failover and failback
-            $totalTime = (Get-Date) - $failoverStart
-            Write-Log -Message "Total time for failover and failback cycle: $($totalTime.TotalSeconds) seconds." -Level "INFO"
-
-            # Additional health check after failback
-            $healthCheckTime = Measure-Command {
-                Test-DbaAvailabilityGroup -SqlInstance $SourceInstance -AvailabilityGroup $AGName -SqlCredential $Credential -EnableException
-            }
-            Write-Log -Message "Health check after failback completed in $($healthCheckTime.TotalSeconds) seconds." -Level "INFO"
-        }
-        catch {
-            Write-Log -Message "Failed to test failover/failback for AG $($AGName): $_" -Level "ERROR"
-            throw
-        }
-    }
-}
-
-# Main execution
 try {
     # Ensure Always On is enabled on all instances
     $instancesToCheck = @($SourceInstance) + ($TargetInstances | ForEach-Object { if ($_.Instance -eq "MSSQLSERVER") { $_.HostServer } else { "$($_.HostServer)\$($_.Instance)" } })
@@ -432,10 +395,6 @@ try {
 
         # Add databases to AG after validation
         Add-DatabasesToAG -Instance $SourceInstance -AGName $agName -Databases $databases -Credential $myCredential -NetworkShare $NetworkShare | Out-Null
-
-        # Test failover and failback for each AG
-        $allInstances = @($TargetInstances) + @(@{HostServer=$SourceInstance; Instance="MSSQLSERVER"})
-        Test-Failover -AGName $agName -Instances $allInstances -Credential $myCredential -Confirm False
     }
 
     Write-Log -Message "All Availability Groups configuration, testing completed." -Level "SUCCESS"
