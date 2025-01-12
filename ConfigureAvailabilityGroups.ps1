@@ -12,6 +12,7 @@ This script:
 - Adds specified databases to their corresponding Availability Groups.
 - Configures replicas.
 - Validates database existence before adding them to AGs.
+- Checks the HostRecordTTL (To be developed).
 
 It does not test or benchmark failovers. This will be deevloped in a separate script.
 
