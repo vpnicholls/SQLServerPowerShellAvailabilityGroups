@@ -256,7 +256,7 @@ function Check-EditionForAGType {
 
     if (-not $alreadyLoggedEdition) {
         Write-Log -Message "SQL Server Edition: $edition" -Level "INFO"
-        Write-Log -Message "AG Type for this edition: $agType" -Level "INFO"
+        Write-Log -Message "Availability Group type for this edition: $agType" -Level "INFO"
         $script:alreadyLoggedEdition = $true
     }
     return $agType
@@ -364,7 +364,6 @@ try {
     $instancesToCheck = @($SourceInstance) + ($TargetInstances | ForEach-Object { if ($_.Instance -eq "MSSQLSERVER") { $_.HostServer } else { "$($_.HostServer)\$($_.Instance)" } })
     $isDomainEnvironment = $true
     foreach ($instance in $instancesToCheck) {
-        Write-Log -Message "Debug: Instance being checked: $instance" -Level "DEBUG"
         $serverName = $instance.Split('\')[0]
         if ($EnableAndRestart) {
             # Check and enable HADR if necessary
