@@ -14,6 +14,7 @@ This script:
 - Configures replicas.
 - Validates database existence before adding them to AGs.
 - Checks the HostRecordTTL (To be developed).
+- Cleans up backup files from the network share at the end of execution.
 
 It does not test or benchmark failovers. This will be developed in a separate script.
 
@@ -435,4 +436,26 @@ try {
 }
 catch {
     Write-Log -Message "An error occurred during multiple AG configuration: $_" -Level "ERROR"
+}
+finally {
+    # Clean up backup files from the network share
+    Write-Log -Message "Cleaning up backup files from the network share." -Level "INFO"
+    try {
+        # Pattern for backup files like "DatabaseName_yyyyMMddhhmm.bak"
+        $backupFiles = Get-ChildItem -Path $NetworkShare -Filter "*_*.bak"
+        if ($backupFiles) {
+            foreach ($file in $backupFiles) {
+                # Check if the filename matches the specific pattern
+                if ($file.Name -match "^(.+)_(\d{12})\.bak$") {
+                    Remove-Item -Path $file.FullName -Force -ErrorAction Stop
+                    Write-Log -Message "Removed backup file: $($file.Name)" -Level "INFO"
+                }
+            }
+        } else {
+            Write-Log -Message "No backup files found to clean up." -Level "INFO"
+        }
+    }
+    catch {
+        Write-Log -Message "Failed to clean up backup files: $_" -Level "ERROR"
+    }
 }
