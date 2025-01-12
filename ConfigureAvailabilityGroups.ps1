@@ -421,7 +421,7 @@ try {
             $agType = Check-EditionForAGType -Instance $SourceInstance -Credential $myCredential
 
             # Create and Configure Availability Group
-            CreateAvailabilityGroup -PrimaryInstance $SourceInstance -AGName $agName -SecondaryInstances $TargetInstances -Credential $myCredential -agConfig $agConfig
+            CreateAvailabilityGroup -PrimaryInstance $SourceInstance -AGName $agName -SecondaryInstances $TargetInstances -Credential $myCredential -agConfig $agConfig | Out-Null
 
             # Before adding databases to AG
             EnsureDatabasesInFullRecoveryMode -Instance $SourceInstance -Credential $myCredential -Databases $databases
