@@ -7,6 +7,7 @@ This script:
 - Checks whether the host servers are part of a domain
 - If not part of a domain, checks to see whether certificate-based authentication is configured
 - Enables Always On on SQL Server instances.
+- Checks for existing Availability Groups and skips creation if they already exist.
 - Creates one or more Availability Groups.
 - Creates the associated Availability Group Listeners.
 - Adds specified databases to their corresponding Availability Groups.
@@ -14,7 +15,7 @@ This script:
 - Validates database existence before adding them to AGs.
 - Checks the HostRecordTTL (To be developed).
 
-It does not test or benchmark failovers. This will be deevloped in a separate script.
+It does not test or benchmark failovers. This will be developed in a separate script.
 
 .PARAMETER myCredential
 Credentials used to connect to SQL Server instances.
@@ -149,6 +150,27 @@ function CheckCertificateAuthForHADR {
         Write-Log -Message "Failed to check HADR endpoint authentication for server $($Instance): $_" -Level "ERROR"
         throw "Failed to check HADR endpoint authentication."
     }
+}
+
+# Define function to check for any requested Availabilty Groups that already exist.
+function Check-ExistingAGs {
+    param (
+        [string]$Instance,
+        [PSCredential]$Credential,
+        [string[]]$AGNames
+    )
+
+    [string[]]$existingAGs = Get-DbaAvailabilityGroup -SqlInstance $Instance -SqlCredential $Credential | Select-Object -ExpandProperty Name
+
+    $nonExistingAGs = @()
+    foreach ($agName in $AGNames) {
+        if ($agName -in $existingAGs) {
+            Write-Log -Message "Availability Group $agName already exists on $Instance. Skipping creation." -Level "WARNING"
+        } else {
+            $nonExistingAGs += $agName
+        }
+    }
+    return $nonExistingAGs
 }
 
 # Define function to check that all databases are in FULL recovery mode
@@ -387,22 +409,27 @@ try {
         }
     }
 
-    # Process each AG configuration
+    $allAGNames = $AGConfigurations | ForEach-Object { $_.Name }
+    $agNamesToCreate = Check-ExistingAGs -Instance $SourceInstance -Credential $myCredential -AGNames $allAGNames
+
+    # Process each AG configuration that doesn't already exist
     foreach ($agConfig in $AGConfigurations) {
         $agName = $agConfig.Name
-        $databases = $agConfig.Databases
+        if ($agName -in $agNamesToCreate) {
+            $databases = $agConfig.Databases
 
-        # Check the edition to determine AG type
-        $agType = Check-EditionForAGType -Instance $SourceInstance -Credential $myCredential
+            # Check the edition to determine AG type
+            $agType = Check-EditionForAGType -Instance $SourceInstance -Credential $myCredential
 
-        # Create and Configure Availability Group
-        CreateAvailabilityGroup -PrimaryInstance $SourceInstance -AGName $agName -SecondaryInstances $TargetInstances -Credential $myCredential -agConfig $agConfig
+            # Create and Configure Availability Group
+            CreateAvailabilityGroup -PrimaryInstance $SourceInstance -AGName $agName -SecondaryInstances $TargetInstances -Credential $myCredential -agConfig $agConfig
 
-        # Before adding databases to AG
-        EnsureDatabasesInFullRecoveryMode -Instance $SourceInstance -Credential $myCredential -Databases $databases
+            # Before adding databases to AG
+            EnsureDatabasesInFullRecoveryMode -Instance $SourceInstance -Credential $myCredential -Databases $databases
 
-        # Add databases to AG after validation
-        Add-DatabasesToAG -Instance $SourceInstance -AGName $agName -Databases $databases -Credential $myCredential -NetworkShare $NetworkShare | Out-Null
+            # Add databases to AG after validation
+            Add-DatabasesToAG -Instance $SourceInstance -AGName $agName -Databases $databases -Credential $myCredential -NetworkShare $NetworkShare | Out-Null
+        }
     }
 
     Write-Log -Message "All Availability Groups configuration, testing completed." -Level "SUCCESS"
