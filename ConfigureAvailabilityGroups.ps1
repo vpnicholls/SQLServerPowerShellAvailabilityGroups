@@ -40,6 +40,10 @@ A network share for backup and restore operations.
 A boolean, where $true instructs the script to attempt to enable the Always On feature and restart the service on all host servers. 
 Use $False if you've already had the the feature enabled and services restarted by other means.
 
+.PARAMETER HasDomainAccount
+Optional parameter, defaulted to TRUE, to indicate that a domain account will be used to access all host servers.
+Set to FALSE to import saved credentials from .\Credentials\<HostServerName>.xml (where . is the directory you have this script saved to).
+
 .EXAMPLE
 $params = @{
     myCredential = (Get-Credential -Message "Please enter your password for the SQL Server instances.")
@@ -79,7 +83,8 @@ param (
     [Parameter(Mandatory=$true)][array]$TargetInstances,
     [Parameter(Mandatory=$true)][array]$AGConfigurations,
     [Parameter(Mandatory=$true)][string]$NetworkShare,
-    [Parameter(Mandatory=$false)][bool]$EnableAndRestart = $false
+    [Parameter(Mandatory=$false)][bool]$EnableAndRestart = $false,
+    [Parameter(Mandatory=$false)][bool]$HasDomainAccount = $true
 )
 
 # Generate log file name with datetime stamp
@@ -100,19 +105,37 @@ function Write-Log {
     "$timestamp [$Level] $Message" | Out-File -FilePath $logFileName -Append
 }
 
-# Collect Windows Credential only if needed
-#if ($EnableAndRestart) {
-#    $WindowsCredential = Get-Credential -Message "Please enter your password for the Windows Hosts. Needed for service restart."
-#} else {
-#    Write-Log -Message "Windows credential not required as service restart is disabled." -Level "INFO"
-#}
+# Import SQL credentials
+if (-not $HasDomainAccount) {
+    try {
+        $myCredential = Import-Clixml -Path ".\Credentials\myCredentials.xml"
+    }
+    catch {
+        Write-Log -Message "Failed to import SQL credentials from .\Credentials\myCredentials.xml: $_" -Level "ERROR"
+        throw "SQL Credential import failed. Please ensure the credentials file is present and accessible."
+    }
+}
 
-# Collect Windows Credential for each host server
+# Collect Windows Credential for each host server if not using domain account
 $ServerCredentials = @{}
-$hosts = @($SourceInstance) + ($TargetInstances | ForEach-Object { $_.HostServer })
-foreach ($server in $hosts) {
-    $serverName = $server.Split('\')[0]  # Get just the server name if it's an instance
-    $ServerCredentials[$serverName] = Get-Credential -Message "Enter local admin credentials for $serverName"
+if (-not $HasDomainAccount) {
+    $hosts = @($SourceInstance) + ($TargetInstances | ForEach-Object { 
+        if ($_.Instance -eq "MSSQLSERVER") { $_.HostServer } else { "$($_.HostServer)\$($_.Instance)" }
+    })
+    foreach ($server in $hosts) {
+        $serverName = $server.Split('\')[0]  # Get just the server name if it's an instance
+        try {
+            $ServerCredentials[$serverName] = Import-Clixml -Path ".\Credentials\$serverName.xml"
+        }
+        catch {
+            Write-Log -Message "Failed to import Windows credentials for $serverName from .\Credentials\$serverName.xml: $_" -Level "ERROR"
+            throw "Windows Credential import for $serverName failed. Please ensure the credential file is present and accessible."
+        }
+    }
+}
+else {
+    # For users with domain account, we don't need to collect credentials for each server
+    # Just use the SQL credential if necessary or leave $ServerCredentials empty for domain scenarios where no local credentials are needed
 }
 
 # Define function to check if server is part of a domain
