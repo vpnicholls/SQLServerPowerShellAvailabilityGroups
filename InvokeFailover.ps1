@@ -9,7 +9,8 @@
     - selecting which Availability Groups to failover
     - updating async Availability Groups to sync
     - performing the failover(s)
-    - reverting, where applicable, Availability Groups back to async.
+    - reverting, where applicable, Availability Groups back to async
+    - to and reporting on the health of Availability Group databases post-failover.
 
 .PARAMETER TargetInstance
     The SQL Server instance to that targeted to failover the Availability Groups to.
@@ -21,10 +22,10 @@
     Specifies the timeout in seconds for various operations like DNS updates. Defaults to 300 seconds (5 minutes).
 
 .EXAMPLE
-    .\InvokeFailover.ps1 -TargetInstance "ServerA\InstanceA" -ScriptEventLogPath "C:\Scripts\Output" -Timeout 300
+    .\SQLFailover.ps1 -TargetInstance "ServerA\InstanceA" -ScriptEventLogPath "C:\Scripts\Output" -Timeout 300
 
 .EXAMPLE
-    .\InvokeFailover.ps1 -TargetInstance "ServerB"
+    .\SQLFailover.ps1 -TargetInstance "ServerB"
 #>
 
 #requires -module dbatools
@@ -36,7 +37,7 @@ param (
 )
 
 # Run DBATools in Insecure mode otherwise it doesn't trust certificate chain connecting to hosts
-Set-DbatoolsInsecureConnection -SessionOnly
+Set-DbatoolsInsecureConnection -SessionOnly | Out-Null
 
 # Create necessary directory if it doesn't already exist
 if (-not (Test-Path -Path $ScriptEventLogPath)) {
@@ -303,8 +304,8 @@ function Report-AGState {
 #############################
 
 try {
-    Read-Host "Press Enter to proceed"
-    
+    Read-Host "Press Enter to proceed. (Please allow about 15 seconds for the functions to load)."
+
     # Get all Availability Groups that fit the criteria
     $AGsToFailover = Get-AGs -TargetInstance $TargetInstance -TargetReplicaType "Secondary"
 
