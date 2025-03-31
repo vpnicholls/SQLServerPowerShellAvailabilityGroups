@@ -21,11 +21,17 @@
 .PARAMETER Timeout
     Specifies the timeout in seconds for various operations like DNS updates. Defaults to 300 seconds (5 minutes).
 
+.PARAMETER All
+    Switch to run the script unattended, failing over all AGs not currently on the target instance.
+
 .EXAMPLE
     .\SQLFailover.ps1 -TargetInstance "ServerA\InstanceA" -ScriptEventLogPath "C:\Scripts\Output" -Timeout 300
 
 .EXAMPLE
     .\SQLFailover.ps1 -TargetInstance "ServerB"
+
+.EXAMPLE
+    .\SQLFailover.ps1 -TargetInstance "ServerB" -All
 #>
 
 #requires -module dbatools
@@ -33,7 +39,8 @@
 param (
     [Parameter(Mandatory=$true)][string]$TargetInstance,
     [string]$ScriptEventLogPath = "$($PSScriptRoot)\Logs",
-    [int]$Timeout = 300
+    [int]$Timeout = 300,
+    [switch]$All
 )
 
 # Run DBATools in Insecure mode otherwise it doesn't trust certificate chain connecting to hosts
@@ -95,7 +102,7 @@ function Get-AGs {
             foreach ($replica in $replicas) {
                 if ($replica.AvailabilityMode -eq 'AsynchronousCommit') {
                     $isAsync = $true
-                    break  # Exit the loop if we find one async replica, assuming this is enough to classify the Availability Group as async
+                    break
                 }
             }
 
@@ -122,21 +129,31 @@ function Get-AGs {
 # Function to get user input for Availability Groups to failover
 function Request-AGsToFailover {
     param (
-        [array]$AGs
+        [array]$AGs,
+        [switch]$All
     )
     try {
         $RequestedAGs = @()
-        foreach ($AG in $AGs) {
-            $confirmation = Read-Host "Failover Availability Group '$($AG.Name)'? (Y/N)"
-            if ($confirmation -ieq 'Y') {
-                $RequestedAGs += $AG
-            }
+        
+        if ($All) {
+            # If All switch is used, select all AGs automatically
+            $RequestedAGs = $AGs
+            Write-Log -Message "Automatically selected all available Availability Groups for failover: $( $RequestedAGs.Name -join ', ' )" -Level INFO
         }
-
-        if ($RequestedAGs.Count -eq 0) {
-            Write-Log -Message "No Availability Groups were selected for failover." -Level INFO
-        } else {
-            Write-Log -Message "Selected Availability Groups for failover: $( $RequestedAGs.Name -join ', ' )" -Level INFO
+        else {
+            # Interactive mode
+            foreach ($AG in $AGs) {
+                $confirmation = Read-Host "Failover Availability Group '$($AG.Name)'? (Y/N)"
+                if ($confirmation -ieq 'Y') {
+                    $RequestedAGs += $AG
+                }
+            }
+            
+            if ($RequestedAGs.Count -eq 0) {
+                Write-Log -Message "No Availability Groups were selected for failover." -Level INFO
+            } else {
+                Write-Log -Message "Selected Availability Groups for failover: $( $RequestedAGs.Name -join ', ' )" -Level INFO
+            }
         }
 
         return $RequestedAGs
@@ -239,7 +256,6 @@ function Report-FailoverCompletion {
 # Function to report completion of all selected Availability Groups
 function Report-AllAGsCompletion {
     try {
-        # TODO: Implement logic to report on all Availability Groups completion
         Write-Log -Message "All selected Availability Groups failover completed" -Level SUCCESS
     }
     catch {
@@ -256,11 +272,9 @@ function Revert-AGsToOriginalMode {
     try {
         foreach ($AG in $AGs) {
             if ($AG.OriginalMode -eq 'AsynchronousCommit') {
-                # Get all replicas for this Availability Group
                 $replicas = Get-DbaAgReplica -SqlInstance $TargetInstance -AvailabilityGroup $AG.Name
                 
                 foreach ($replica in $replicas) {
-                    # Revert the replica to asynchronous mode
                     Set-DbaAgReplica -SqlInstance $TargetInstance -AvailabilityGroup $AG.Name -Replica $replica.Name -AvailabilityMode AsynchronousCommit | Out-Null
                     Write-Log -Message "Reverted replica $( $replica.Name ) in Availability Group $( $AG.Name ) to Asynchronous Commit mode." -Level INFO
                 }
@@ -282,8 +296,6 @@ function Report-AGState {
         $Replicas = Get-DbaAgReplica -SqlInstance $SqlInstance | Where-Object {$_.Role -in @("Primary", "Secondary") -and $_.SqlInstance -eq $_.Name}
 
         foreach ($Replica in $Replicas) {
-            
-            # Report the properties you're interested in
             $stateMessage = "AG Name: $($Replica.AvailabilityGroup), " +
                             "Role: $($Replica.Role), " +
                             "Failover Mode: $($Replica.FailoverMode), " +
@@ -304,13 +316,18 @@ function Report-AGState {
 #############################
 
 try {
-    Read-Host "Press Enter to proceed. (Please allow about 15 seconds for the functions to load)."
+    if (-not $All) {
+        Read-Host "Press Enter to proceed. (Please allow about 15 seconds for the functions to load)"
+    }
+    else {
+        Write-Log -Message "Running in unattended mode with -All switch" -Level INFO
+    }
 
     # Get all Availability Groups that fit the criteria
     $AGsToFailover = Get-AGs -TargetInstance $TargetInstance -TargetReplicaType "Secondary"
 
     # Confirm which Availability Groups to failover
-    $confirmedAGs = @(Request-AGsToFailover -AGs $AGsToFailover)
+    $confirmedAGs = @(Request-AGsToFailover -AGs $AGsToFailover -All:$All)
 
     # Only change to synchronous mode and wait for sync for the confirmed AGs
     if ($confirmedAGs.Count -gt 0) {
@@ -332,9 +349,13 @@ try {
     # After all operations
     Report-AGState -SQLInstance $TargetInstance
 
-    Read-Host "Press Enter to close"
+    if (-not $All) {
+        Read-Host "Press Enter to close"
+    }
 }
 catch {
     Write-Log -Message "An error occurred during script execution: $( $_ )" -Level FATAL
-    Read-Host "Press Enter to close"
+    if (-not $All) {
+        Read-Host "Press Enter to close"
+    }
 }
