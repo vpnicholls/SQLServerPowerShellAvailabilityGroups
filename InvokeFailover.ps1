@@ -303,7 +303,7 @@ function Report-AGState {
 #############################
 
 try {
-    Read-Host "Press Enter to start"
+    Read-Host "Press Enter to proceed"
     
     # Get all Availability Groups that fit the criteria
     $AGsToFailover = Get-AGs -TargetInstance $TargetInstance -TargetReplicaType "Secondary"
