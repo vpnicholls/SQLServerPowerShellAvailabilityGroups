@@ -9,8 +9,7 @@
     - selecting which Availability Groups to failover
     - updating async Availability Groups to sync
     - performing the failover(s)
-    - reverting, where applicable, Availability Groups back to async
-    - to and reporting on the health of Availability Group databases post-failover.
+    - reverting, where applicable, Availability Groups back to async.
 
 .PARAMETER TargetInstance
     The SQL Server instance to that targeted to failover the Availability Groups to.
@@ -22,10 +21,10 @@
     Specifies the timeout in seconds for various operations like DNS updates. Defaults to 300 seconds (5 minutes).
 
 .EXAMPLE
-    .\SQLFailover.ps1 -TargetInstance "ServerA\InstanceA" -ScriptEventLogPath "C:\Scripts\Output" -Timeout 300
+    .\InvokeFailover.ps1 -TargetInstance "ServerA\InstanceA" -ScriptEventLogPath "C:\Scripts\Output" -Timeout 300
 
 .EXAMPLE
-    .\SQLFailover.ps1 -TargetInstance "ServerB"
+    .\InvokeFailover.ps1 -TargetInstance "ServerB"
 #>
 
 #requires -module dbatools
